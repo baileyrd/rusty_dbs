@@ -67,5 +67,9 @@ yet, so everything so far is under Unreleased.
   as still-open work, caught and corrected as later features shipped.
 - Dead/orphaned helper code removed once its real caller landed instead
   of left unreachable.
+- Test suite made deterministic on Windows: connector-discovery tests no
+  longer depend on the host's ambient `PATH`/an unbuilt workspace, and
+  Unix-only subprocess fixtures (`#!/bin/sh` scripts) are properly gated
+  instead of failing outright.
 
 ### Security

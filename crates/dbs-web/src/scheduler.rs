@@ -122,8 +122,10 @@ mod tests {
 
     /// A minimal, valid `Config` for scheduler tests — mirrors `lib.rs`'s
     /// own `test_config()` (this module can't reach that one directly;
-    /// it lives in a different `#[cfg(test)] mod tests`).
+    /// it lives in a different `#[cfg(test)] mod tests`), including the
+    /// `sanitize_test_path` call — see that function's doc comment.
     fn test_config(database: &str) -> Config {
+        crate::sanitize_test_path();
         Config {
             database: database.to_string(),
             export_dir: "exports".to_string(),
