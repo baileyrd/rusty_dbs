@@ -416,7 +416,7 @@ enum ResearchCommand {
     /// Search YouTube, feed videos into a NotebookLM notebook, write a
     /// markdown research report.
     Youtube {
-        /// Research topic, e.g. "claude code skills".
+        /// Research topic, e.g. "home espresso brewing".
         topic: String,
         /// Search query variant (repeatable). Default: one query derived
         /// from TOPIC.
@@ -453,7 +453,7 @@ enum ResearchCommand {
     /// a markdown research report.
     #[command(name = "youtube-backup")]
     YoutubeBackup {
-        /// Research topic, e.g. "claude code skills".
+        /// Research topic, e.g. "home espresso brewing".
         topic: String,
         /// Configured YouTube source name (repeatable). Default: every
         /// youtube source.
