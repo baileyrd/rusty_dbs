@@ -8,6 +8,23 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Replace the research feature's unrelated-product example topic (closes #265)
+**2026-08-17**
+
+The web UI's Research page Topic field placeholder was `"claude code
+skills"` — an unrelated product name ("Claude Code" is a different tool
+entirely) in an app about personal backups/YouTube research. Turned out
+not to be an isolated leftover: the same phrase was used consistently as
+the example topic across `dbs research youtube`/`youtube-backup`'s own
+`--help` text (`clap` doc comments) and as the literal topic argument in
+6 places across `dbs-cli/tests/research.rs`. Replaced all of it with a
+neutral, on-domain example (`"home espresso brewing"`) so the CLI help,
+web placeholder, and tests stay consistent with each other, rather than
+fixing the web UI alone and creating a new mismatch.
+
+---
+
+
 ## Update README/ARCHITECTURE/CHANGELOG/ADRs to reflect current repo state
 **2026-08-15**
 

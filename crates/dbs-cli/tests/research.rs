@@ -73,7 +73,7 @@ fn research_youtube_fails_cleanly_and_writes_no_report() {
     let output = run(
         &dir,
         &config_path,
-        &["research", "youtube", "claude code skills"],
+        &["research", "youtube", "home espresso brewing"],
     );
     assert_eq!(output.status.code(), Some(4), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -94,7 +94,7 @@ fn research_youtube_with_a_custom_out_path_still_writes_nothing_on_failure() {
         &[
             "research",
             "youtube",
-            "claude code skills",
+            "home espresso brewing",
             "--out",
             "report.md",
         ],
@@ -125,7 +125,7 @@ fn research_youtube_backup_with_no_sources_configured_reports_no_videos_matched(
     let output = run(
         &dir,
         &config_path,
-        &["research", "youtube-backup", "claude code skills"],
+        &["research", "youtube-backup", "home espresso brewing"],
     );
     assert_eq!(output.status.code(), Some(4), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -149,7 +149,7 @@ fn research_youtube_backup_reports_the_source_scope_in_the_no_match_message() {
         &[
             "research",
             "youtube-backup",
-            "claude code skills",
+            "home espresso brewing",
             "--source",
             "my-yt",
         ],
@@ -175,7 +175,7 @@ fn research_youtube_backup_reports_the_list_scope_in_the_no_match_message() {
         &[
             "research",
             "youtube-backup",
-            "claude code skills",
+            "home espresso brewing",
             "--list",
             "watch-later",
         ],
@@ -247,7 +247,7 @@ fn research_youtube_backup_with_a_matched_video_runs_the_pipeline_and_fails_clea
         &[
             "research",
             "youtube-backup",
-            "claude code skills",
+            "home espresso brewing",
             "--source",
             "yt",
         ],
