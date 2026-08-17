@@ -67,6 +67,10 @@ yet, so everything so far is under Unreleased.
   as still-open work, caught and corrected as later features shipped.
 - Dead/orphaned helper code removed once its real caller landed instead
   of left unreachable.
+- The Library table's `MEDIA` count (and the CLI's `dbs items` `[N
+  media]` suffix) now counts stored media only, matching the summary
+  card and item detail panel — previously it counted every declared
+  media entry even when nothing was actually downloaded.
 - The web UI's sidebar is reachable again on mobile viewports (≤760px)
   via a new hamburger toggle — it was previously hidden with no way to
   reopen it, leaving every page but Overview unreachable on a phone.
