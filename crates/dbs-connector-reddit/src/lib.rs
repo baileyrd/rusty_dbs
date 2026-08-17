@@ -977,6 +977,7 @@ mod tests {
     // tested without needing real Python, Playwright, or network
     // access. ---------------------------------------------------------
 
+    #[cfg(unix)]
     fn write_stub_script(
         dir: &std::path::Path,
         stdout: &str,
@@ -993,6 +994,12 @@ mod tests {
         path
     }
 
+    // Shebang scripts only exec on Unix kernels; on Windows there is no
+    // `/bin/sh` and no shebang-based exec, so these acquisition tests
+    // (which spawn a synthetic shell script) are Unix-only. The
+    // production `acquire_using`/subprocess-launching code itself is
+    // fully cross-platform.
+    #[cfg(unix)]
     #[test]
     fn acquire_using_parses_a_successful_result() {
         let dir = temp_dir("acquire-success");
@@ -1015,6 +1022,7 @@ mod tests {
         assert_eq!(result.children.len(), 1);
     }
 
+    #[cfg(unix)]
     fn acquire_with_error_kind(
         dir: &std::path::Path,
         kind: &str,
@@ -1035,6 +1043,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_maps_each_error_kind_to_the_matching_connector_error() {
         let dir = temp_dir("acquire-errors");
@@ -1056,6 +1065,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_treats_unparseable_output_as_transient() {
         let dir = temp_dir("acquire-garbage");
@@ -1075,6 +1085,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_treats_no_output_as_transient() {
         let dir = temp_dir("acquire-empty");
@@ -1100,6 +1111,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_passes_config_through_as_positional_arguments() {
         let dir = temp_dir("acquire-args");

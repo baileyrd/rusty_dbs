@@ -42,6 +42,81 @@ walkthrough of every tab, dark/light theme, exports, and a real backup run):
 
 ---
 
+## Resolve connector secrets from `.env`, not just the process environment (closes #262)
+**2026-08-17**
+
+`SubprocessRunner::run_connector` resolved a connector's declared
+`secret_keys` purely via `std::env::var(key)` — the real OS process
+environment — with no reference to `.env` at all. Every other secret
+consumer in the codebase (`BackupService::doctor`,
+`crypto::resolve_passphrase`, `BackupService::restore`) correctly
+threads a `secret_store` map parsed from `.env`; this one call site was
+never wired the same way. Result: the entire documented setup flow was
+broken — `dbs init`'s own printed instructions, the generated
+`dbs.toml`'s `token_env` comments, ADR-0001's stated design ("secrets
+... live in `.env`"), and the web UI's whole "API keys" page all assume
+a `.env` value reaches the connector, and none of them did. `dbs
+doctor` made it worse by correctly reading `.env` and reporting a
+secret "set" right before the same backup failed with "required secret
+is not set in the environment."
+
+Fixed by reading `.env` (via `parse_env_file(&self.config
+.env_file_path())`) fresh on every `run_connector` call, preferring it
+over the process environment when both are set — the same precedence
+`resolve_passphrase` already guarantees. Reads it fresh rather than
+caching: `dbs serve` doesn't restart when the web UI's "API keys" page
+writes a new value, so the very next run must see it. 2 new
+integration tests in `dbs-core/tests/run_stream_integration.rs`,
+exercising the real subprocess boundary end to end via
+`test_connector_fixture`: a secret arriving purely from `.env`, and
+`.env` winning over a conflicting process-env value.
+
+---
+
+## Make the test suite deterministic on Windows
+**2026-08-16**
+
+Running `cargo test`/`cargo clippy -- -D warnings` on a Windows dev
+machine after a full `cargo build --workspace` surfaced 13 failing test
+targets, none pre-existing on Linux CI and none caused by unrelated
+edits (confirmed via `git stash` isolation and a controlled experiment
+moving connector binaries out of `target/debug`). Two root causes, both
+platform-specific:
+
+1. **Cargo/Windows PATH injection**: `cargo test` prepends the crate's
+   own `target/debug` to the *test process's* `PATH` for DLL resolution;
+   after `cargo build --workspace` that directory holds every real
+   `dbs-connector-*.exe` this repo ships. Any test assuming "PATH has no
+   connectors" (or using a real type like `raindrop` as a stand-in for
+   "unregistered") silently broke. Fixed in `dbs-web` with a
+   `sanitize_test_path()` `Once`-guarded helper that strips exactly the
+   injected directory from the test process's own `PATH`; fixed in
+   `dbs-cli`'s integration tests by scoping the *spawned child's* `PATH`
+   via `Command::env("PATH", ...)` in each file's shared `run()` helper
+   (no `unsafe`, no global mutation), plus one type-name swap where no
+   shared helper existed. Along the way, found and fixed a real latent
+   bug this exposed: `connectors_dir_with_raindrop()` (a test fixture)
+   copied the connector binary without Windows' `.exe` suffix, so
+   `connectors_dir`-based discovery was silently broken on Windows the
+   whole time, masked only by the same PATH pollution.
+2. **Unix-only shebang test fixtures**: several tests write a `#!/bin/sh`
+   script (or hardcode `/bin/sh` as an interpreter) and execute it
+   directly — a Unix kernel `exec()` feature Windows lacks. Gated
+   `#[cfg(unix)]` on the confirmed-failing tests and their
+   exclusively-used helpers across `dbs-connector-support`, `-reddit`,
+   `-skool`, `-udemy`, `-vimeo`, `-youtube` (lib + integration test), and
+   `dbs-research`, matching the convention already established in
+   `dbs-web`. Also fixed one pre-existing instance of the same gap in
+   `dbs-core::registry` (`scan_temp_dir`, flagged only by
+   `clippy -D warnings`).
+
+No production behavior changed; only test fixtures and cfg-gating.
+`cargo build`, `cargo test`, `cargo clippy --all-targets --all-features
+-- -D warnings`, and `cargo fmt --all -- --check` — the four commands
+README documents — are all green on Windows.
+
+---
+
 
 ## Update README/ARCHITECTURE/CHANGELOG/ADRs to reflect current repo state
 **2026-08-15**

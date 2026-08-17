@@ -50,7 +50,14 @@ fn temp_dir(label: &str) -> PathBuf {
 fn connectors_dir_with_raindrop(label: &str) -> PathBuf {
     let dir = temp_dir(label).join("connectors");
     std::fs::create_dir_all(&dir).unwrap();
-    let dest = dir.join("dbs-connector-raindrop");
+    // `is_executable_file` (`dbs-core::registry`) requires a `.exe`
+    // extension on Windows — a `dbs-connector-raindrop` copy without
+    // one is silently invisible to `scan_connector_candidates`, same
+    // suffix `raindrop_connector_bin()` already appends for the source.
+    let dest = dir.join(format!(
+        "dbs-connector-raindrop{}",
+        std::env::consts::EXE_SUFFIX
+    ));
     std::fs::copy(raindrop_connector_bin(), &dest).unwrap();
     #[cfg(unix)]
     {
@@ -81,6 +88,29 @@ fn write_config(
     config_path
 }
 
+/// On Windows, `cargo test` prepends this test binary's own
+/// build-output directory (`target/debug` — exactly `dbs_bin()`'s
+/// parent, since `CARGO_BIN_EXE_dbs` points straight at it) to *this
+/// test process's* `PATH`, for DLL resolution. After `cargo build
+/// --workspace`, that same directory holds every real
+/// `dbs-connector-*` binary this repo ships (including the very
+/// `dbs-connector-raindrop` this file copies around) — genuinely
+/// discoverable via bare `PATH`, which is exactly what
+/// `discovery_still_finds_nothing_without_a_configured_connectors_dir`
+/// exists to prove *doesn't* happen. Strip that one directory so
+/// `PATH`-only discovery in the spawned `dbs` child means what this
+/// file's tests need it to mean; `connectors_dir`-based discovery
+/// (the other three tests) is unaffected since it never depends on
+/// `PATH` at all.
+fn sanitized_path() -> std::ffi::OsString {
+    let own_dir = dbs_bin().parent().map(std::path::Path::to_path_buf);
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(
+        std::env::split_paths(&path_var).filter(|p| Some(p.as_path()) != own_dir.as_deref()),
+    )
+    .unwrap_or(path_var)
+}
+
 fn run(
     dir: &std::path::Path,
     config_path: &std::path::Path,
@@ -88,6 +118,7 @@ fn run(
 ) -> std::process::Output {
     Command::new(dbs_bin())
         .current_dir(dir)
+        .env("PATH", sanitized_path())
         .arg("--config")
         .arg(config_path)
         .args(args)
