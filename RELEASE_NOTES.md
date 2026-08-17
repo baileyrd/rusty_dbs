@@ -8,6 +8,35 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Remove the duplicate nav-wiring block that double-fired every tab's loader (closes #271)
+**2026-08-17**
+
+`static/app.js` lines 128–133 and 153–158 were byte-identical duplicate
+blocks binding `.nav-item`/`[data-goto]` click listeners — a copy-paste
+regression from #268 (the mobile-sidebar fix), which inserted the new
+mobile-sidebar wiring between an existing copy of these two blocks and a
+second copy of them instead of moving/replacing the original. Every
+sidebar nav click or `data-goto` link click fired `switchTab()` twice,
+doubling every API call the target tab's loader made. Visible breakage
+depended on whether that loader's render cleared its container before or
+after its `await` (inconsistent across loaders): Connectors rendered 28
+cards for 14 real connectors, Library doubled its summary tiles and
+showed 10 table rows for 5 real items, Research doubled its
+NotebookLM-login instructional card, API keys listed `RAINDROP_TOKEN`
+twice — while Sources/Overview/Verify happened not to visibly duplicate
+(their loaders clear *after* the await, so the second call's clear wiped
+the first's render) despite still double-fetching underneath.
+
+Fixed by deleting the second copy. Confirmed via instrumented
+`switchTab`/`loadConnectors` call-count tracing (now 1× per click, was
+2×), direct network capture (`/api/connectors` now fires once per
+Connectors click), and a real `dbs serve` + headless-browser pass:
+Connectors renders exactly 14 cards, and the mobile sidebar (#263) still
+opens/closes correctly — no regression to the fix that introduced this.
+
+---
+
+
 ## Replace the research feature's unrelated-product example topic (closes #265)
 **2026-08-17**
 
