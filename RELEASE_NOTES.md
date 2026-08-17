@@ -8,6 +8,27 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Fix Library table's MEDIA count to reflect stored media, not declared media (closes #264)
+**2026-08-17**
+
+The Library table's `MEDIA` column (and the CLI's `dbs items` `[N media]`
+suffix — same field) came from `try_browse_items`'s per-item subquery,
+`SELECT COUNT(*) FROM media m WHERE m.item_id = i.id`: every `media` row
+the connector declared, regardless of whether bytes were ever downloaded.
+`store_media` is off by default, so any item with a declared-but-unstored
+enclosure (e.g. a podcast episode's audio) showed `MEDIA: 1` — directly
+contradicting the "Media files" summary card above it (which already
+correctly filters `WHERE data IS NOT NULL`) and the item's own detail
+panel (`audio (not stored)`).
+
+Added the same `AND m.data IS NOT NULL` filter to the per-item subquery,
+so both counts now mean the same thing throughout the app. 2 new
+`sqlite_storage` tests pin the contract: a declared-but-unstored media
+entry counts as 0, a `store_media`-fetched one counts as 1.
+
+---
+
+
 ## Update README/ARCHITECTURE/CHANGELOG/ADRs to reflect current repo state
 **2026-08-15**
 

@@ -67,5 +67,9 @@ yet, so everything so far is under Unreleased.
   as still-open work, caught and corrected as later features shipped.
 - Dead/orphaned helper code removed once its real caller landed instead
   of left unreachable.
+- The Library table's `MEDIA` count (and the CLI's `dbs items` `[N
+  media]` suffix) now counts stored media only, matching the summary
+  card and item detail panel — previously it counted every declared
+  media entry even when nothing was actually downloaded.
 
 ### Security
