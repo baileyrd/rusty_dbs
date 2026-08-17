@@ -211,6 +211,104 @@ fn sources_add_rejects_a_name_that_already_exists() {
 }
 
 #[test]
+fn sources_remove_deletes_the_source_from_the_config() {
+    let dir = temp_dir("sources-remove-ok");
+    let config_path = write_config(
+        &dir,
+        "[sources.a]\ntype = \"raindrop\"\nenabled = true\n\
+         [sources.b]\ntype = \"raindrop\"\nenabled = false\n",
+    );
+
+    let output = run(&dir, &config_path, &["sources", "remove", "a"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Removed source \"a\""), "{stdout}");
+
+    let after = std::fs::read_to_string(&config_path).unwrap();
+    assert!(!after.contains("[sources.a]"), "{after}");
+    assert!(after.contains("[sources.b]"), "{after}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sources_remove_rejects_a_name_that_is_not_configured() {
+    let dir = temp_dir("sources-remove-missing");
+    let config_path = write_config(&dir, "[sources.a]\ntype = \"raindrop\"\nenabled = true\n");
+
+    let output = run(&dir, &config_path, &["sources", "remove", "nope"]);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("nope"), "{stderr}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sources_enable_flips_a_disabled_source_to_enabled() {
+    let dir = temp_dir("sources-enable-ok");
+    let config_path = write_config(&dir, "[sources.a]\ntype = \"raindrop\"\nenabled = false\n");
+
+    let output = run(&dir, &config_path, &["sources", "enable", "a"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Enabled source \"a\""), "{stdout}");
+
+    let list_output = run(&dir, &config_path, &["sources", "list", "--json"]);
+    assert_eq!(list_output.status.code(), Some(0), "{list_output:?}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(list_output.stdout).unwrap()).unwrap();
+    assert_eq!(parsed[0]["enabled"], true);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sources_enable_rejects_a_name_that_is_not_configured() {
+    let dir = temp_dir("sources-enable-missing");
+    let config_path = write_config(&dir, "[sources.a]\ntype = \"raindrop\"\nenabled = false\n");
+
+    let output = run(&dir, &config_path, &["sources", "enable", "nope"]);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("nope"), "{stderr}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sources_disable_flips_an_enabled_source_to_disabled() {
+    let dir = temp_dir("sources-disable-ok");
+    let config_path = write_config(&dir, "[sources.a]\ntype = \"raindrop\"\nenabled = true\n");
+
+    let output = run(&dir, &config_path, &["sources", "disable", "a"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Disabled source \"a\""), "{stdout}");
+
+    let list_output = run(&dir, &config_path, &["sources", "list", "--json"]);
+    assert_eq!(list_output.status.code(), Some(0), "{list_output:?}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(list_output.stdout).unwrap()).unwrap();
+    assert_eq!(parsed[0]["enabled"], false);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sources_disable_rejects_a_name_that_is_not_configured() {
+    let dir = temp_dir("sources-disable-missing");
+    let config_path = write_config(&dir, "[sources.a]\ntype = \"raindrop\"\nenabled = true\n");
+
+    let output = run(&dir, &config_path, &["sources", "disable", "nope"]);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("nope"), "{stderr}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn connectors_list_with_no_connectors_registered_prints_nothing() {
     let dir = temp_dir("connectors-list-empty");
     let config_path = write_config(&dir, "");

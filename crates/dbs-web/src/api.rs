@@ -110,6 +110,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/thumb/:id", get(thumb))
         .route("/api/connectors", get(connectors))
         .route("/api/sources", get(sources).post(create_source))
+        .route(
+            "/api/sources/:name",
+            delete(delete_source).patch(update_source),
+        )
         .route("/api/secrets", get(secrets).post(set_secret))
         .route("/api/secrets/:name", delete(delete_secret))
         .route("/api/backup", post(start_backup))
@@ -646,6 +650,57 @@ async fn create_source(
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok(Json(json!({"name": name, "type": type_})))
+}
+
+/// `DELETE /api/sources/:name` — bridges `BackupService::remove_source`,
+/// deleting the `[sources.NAME]` block from the config file in place.
+/// On success returns `{"name": ...}`, matching `create_source`'s shape.
+async fn delete_source(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let name_for_task = name.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        service.remove_source(&name_for_task)
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(json!({"name": name})))
+}
+
+/// Request body for `PATCH /api/sources/:name` — `app.js`'s
+/// `setSourceEnabled` sends exactly `{enabled}`.
+#[derive(Deserialize)]
+struct UpdateSourceRequest {
+    enabled: bool,
+}
+
+/// `PATCH /api/sources/:name` — bridges `BackupService::set_source_enabled`,
+/// flipping the source's `enabled` flag in the config file in place. On
+/// success returns `{"name": ..., "enabled": ...}`.
+async fn update_source(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<UpdateSourceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let name_for_task = name.clone();
+    let enabled = body.enabled;
+    tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        service.set_source_enabled(&name_for_task, enabled)
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(json!({"name": name, "enabled": enabled})))
 }
 
 // -- secrets (issue #173) ------------------------------------------------

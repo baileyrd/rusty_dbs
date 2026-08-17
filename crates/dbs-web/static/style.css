@@ -272,6 +272,8 @@ nav#tabs { display: flex; flex-direction: column; gap: 4px; }
 .btn.small { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
 .btn.ghost { border-color: transparent; background: transparent; color: var(--text-2); }
 .btn.ghost:hover { background: var(--panel-2); color: var(--text); }
+.btn.err { border-color: var(--err); color: var(--err); }
+.btn.err:hover { background: var(--err-soft); color: var(--err); }
 /* Mobile-only nav toggle — shown by the `max-width: 760px` media query
    below; hidden on desktop where the sidebar is always visible. */
 .menu-toggle { display: none; }

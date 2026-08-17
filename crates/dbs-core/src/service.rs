@@ -244,6 +244,27 @@ fn toml_value(value: &Value) -> String {
     }
 }
 
+/// Parses `path`'s current contents as an editable, format-preserving
+/// TOML document — the read half of [`BackupService::remove_source`]/
+/// [`BackupService::set_source_enabled`]'s "modify one block in place,
+/// touch nothing else" contract.
+fn read_config_document(path: &std::path::Path) -> Result<toml_edit::DocumentMut, DbsError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| DbsError::Storage(format!("failed to read config file: {e}")))?;
+    text.parse::<toml_edit::DocumentMut>()
+        .map_err(|e| DbsError::Config(format!("config file is not valid TOML: {e}")))
+}
+
+/// Writes an edited document back to `path`. Paired with
+/// [`read_config_document`].
+fn write_config_document(
+    path: &std::path::Path,
+    doc: &toml_edit::DocumentMut,
+) -> Result<(), DbsError> {
+    std::fs::write(path, doc.to_string())
+        .map_err(|e| DbsError::Storage(format!("failed to write config file: {e}")))
+}
+
 /// What a [`ConnectorRunner`] reports back from actually running a
 /// connector's fetch — everything `BackupService` needs to call
 /// `Storage::finish_run` and build the returned [`RunResult`].
@@ -1326,6 +1347,75 @@ impl<'a> BackupService<'a> {
         file.write_all(block.as_bytes())
             .map_err(|e| DbsError::Storage(format!("failed to append source to config: {e}")))?;
         Ok(())
+    }
+
+    /// Deletes an existing `[sources.NAME]` block from the config file
+    /// entirely, in place - format-preserving via `toml_edit`, so every
+    /// other source's comments/layout are left byte-identical (unlike
+    /// [`Self::add_source`]'s plain append, an in-place removal has to
+    /// parse the file to find the right block; re-serializing through
+    /// `toml::Value` instead would silently drop every comment in the
+    /// file, and this file is meant to carry them - see `dbs init`'s
+    /// generated example). Deliberately does **not** touch this
+    /// source's history in the database: the backed-up items stay
+    /// (`browse`/`export` keep working), they simply stop being backed
+    /// up until the source is re-added under the same name. Like
+    /// [`Self::add_source`], does not update `self.config` in memory.
+    pub fn remove_source(&self, name: &str) -> Result<(), DbsError> {
+        if !self.config.sources.contains_key(name) {
+            return Err(DbsError::Config(format!(
+                "source {name:?} is not configured"
+            )));
+        }
+        let Some(path) = &self.config.source_path else {
+            return Err(DbsError::Config(
+                "no config file to remove the source from".to_string(),
+            ));
+        };
+        let mut doc = read_config_document(path)?;
+        let removed = doc
+            .get_mut("sources")
+            .and_then(|s| s.as_table_like_mut())
+            .is_some_and(|sources| sources.remove(name).is_some());
+        if !removed {
+            return Err(DbsError::Config(format!(
+                "source {name:?} not found in the config file's [sources] table"
+            )));
+        }
+        write_config_document(path, &doc)
+    }
+
+    /// Flips an existing source's `enabled` flag in place - format-
+    /// preserving, like [`Self::remove_source`]. `backup_source` and
+    /// `backup_all` already skip a source whose `enabled` is `false`
+    /// (see the `backup_all_only_due_includes_every_never_run_source`-
+    /// adjacent tests below), so setting this to `false` is a
+    /// non-destructive pause: the source's config and every already
+    /// backed-up item stay exactly as they are, and re-enabling it
+    /// resumes incrementally from its last checkpoint. Like
+    /// [`Self::add_source`], does not update `self.config` in memory.
+    pub fn set_source_enabled(&self, name: &str, enabled: bool) -> Result<(), DbsError> {
+        if !self.config.sources.contains_key(name) {
+            return Err(DbsError::Config(format!(
+                "source {name:?} is not configured"
+            )));
+        }
+        let Some(path) = &self.config.source_path else {
+            return Err(DbsError::Config("no config file to update".to_string()));
+        };
+        let mut doc = read_config_document(path)?;
+        let source = doc
+            .get_mut("sources")
+            .and_then(|s| s.as_table_like_mut())
+            .and_then(|sources| sources.get_mut(name))
+            .and_then(|s| s.as_table_like_mut())
+            .ok_or_else(|| {
+                DbsError::Config(format!(
+                    "source {name:?} not found in the config file's [sources] table"
+                ))
+            })?;
+        source.insert("enabled", toml_edit::value(enabled));
+        write_config_document(path, &doc)
     }
 
     /// Environment/health diagnostics — the README's troubleshooting
@@ -4231,6 +4321,153 @@ mod tests {
             .add_source("a", "raindrop", &HashMap::new(), false, 0, false)
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn remove_source_deletes_the_block_and_preserves_every_other_sources_formatting() {
+        let dir = restore_temp_dir("remove-source");
+        let config_path = dir.join("dbs.toml");
+        std::fs::write(
+            &config_path,
+            "[dbs]\ndatabase = \"dbs.sqlite3\"\n\n\
+             # A hand-written comment explaining source b.\n\
+             [sources.b]\n\
+             type = \"raindrop\"\n\
+             enabled = true\n\
+             page_size = 25 # inline comment\n\n\
+             [sources.a]\n\
+             type = \"raindrop\"\n\
+             enabled = true\n",
+        )
+        .unwrap();
+
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        sources.insert("b".to_string(), test_source_config("b", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let mut config = test_config(sources);
+        config.source_path = Some(config_path.clone());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        service.remove_source("a").unwrap();
+
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!text.contains("[sources.a]"), "{text}");
+        // b's block, comment, and inline comment survive byte-for-byte.
+        assert!(
+            text.contains(
+                "# A hand-written comment explaining source b.\n\
+                 [sources.b]\n\
+                 type = \"raindrop\"\n\
+                 enabled = true\n\
+                 page_size = 25 # inline comment\n"
+            ),
+            "{text}"
+        );
+
+        let parsed = crate::config::load_config(&config_path).unwrap();
+        assert!(!parsed.sources.contains_key("a"));
+        assert!(parsed.sources.contains_key("b"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_source_rejects_a_name_that_is_not_configured() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service.remove_source("missing").unwrap_err();
+        assert!(matches!(err, DbsError::Config(_)));
+    }
+
+    #[test]
+    fn set_source_enabled_flips_an_existing_flag_without_touching_other_keys() {
+        let dir = restore_temp_dir("set-source-enabled");
+        let config_path = dir.join("dbs.toml");
+        std::fs::write(
+            &config_path,
+            "[dbs]\ndatabase = \"dbs.sqlite3\"\n\n\
+             [sources.a]\n\
+             type = \"raindrop\"\n\
+             enabled = true\n\
+             page_size = 25\n",
+        )
+        .unwrap();
+
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let mut config = test_config(sources);
+        config.source_path = Some(config_path.clone());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        service.set_source_enabled("a", false).unwrap();
+
+        let parsed = crate::config::load_config(&config_path).unwrap();
+        assert!(!parsed.sources["a"].enabled);
+        assert_eq!(
+            parsed.sources["a"]
+                .options
+                .get("page_size")
+                .and_then(|v| v.as_integer()),
+            Some(25)
+        );
+
+        service.set_source_enabled("a", true).unwrap();
+        let parsed = crate::config::load_config(&config_path).unwrap();
+        assert!(parsed.sources["a"].enabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_source_enabled_inserts_the_key_when_the_block_never_had_one() {
+        let dir = restore_temp_dir("set-source-enabled-missing-key");
+        let config_path = dir.join("dbs.toml");
+        // No `enabled` line at all - the config loader's own default
+        // (`enabled` absent = true) is what a hand-written minimal block
+        // relies on; disabling it must add the key, not error.
+        std::fs::write(
+            &config_path,
+            "[dbs]\ndatabase = \"dbs.sqlite3\"\n\n[sources.a]\ntype = \"raindrop\"\n",
+        )
+        .unwrap();
+
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let mut config = test_config(sources);
+        config.source_path = Some(config_path.clone());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        service.set_source_enabled("a", false).unwrap();
+
+        let parsed = crate::config::load_config(&config_path).unwrap();
+        assert!(!parsed.sources["a"].enabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_source_enabled_rejects_a_name_that_is_not_configured() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service.set_source_enabled("missing", false).unwrap_err();
+        assert!(matches!(err, DbsError::Config(_)));
     }
 
     fn fake_connector_with_auth_capture(type_name: &str, kind: &str) -> RegisteredConnector {

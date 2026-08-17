@@ -55,6 +55,10 @@ yet, so everything so far is under Unreleased.
   Markdown research report.
 - **Webhook notifications**: `[dbs] notify_url`/`notify_on` POSTs a
   Slack/Discord-compatible summary after each backup batch.
+- **Source lifecycle management**: `dbs sources remove`/`enable`/`disable`
+  (CLI) and matching `DELETE`/`PATCH /api/sources/:name` + Remove/Enable
+  buttons (web UI) — previously only `add` existed, so removing or pausing
+  a source required hand-editing `dbs.toml`.
 
 ### Changed
 - `[dbs] http_timeout`/`http_rate_limit_per_min` now reach the connector
