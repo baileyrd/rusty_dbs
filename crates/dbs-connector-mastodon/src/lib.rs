@@ -358,6 +358,19 @@ impl Connector for MastodonConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "instance": {
+                    "type": "string",
+                    "default": "",
+                    "description": "The Mastodon instance domain to back up from, e.g. https://mastodon.social."
+                }
+            }
+        })
+    }
+
     /// Reads `instance` from this source's `[sources.NAME]` config
     /// (ADR-0002) — there's no sensible default for it (unlike
     /// raindrop/github/etc., which authenticate purely off a secret,
@@ -898,5 +911,17 @@ mod tests {
                 "account".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = MastodonConnector::new(MastodonConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("instance"),
+            "missing schema key: instance"
+        );
+        assert_eq!(schema["properties"]["instance"]["type"], "string");
     }
 }

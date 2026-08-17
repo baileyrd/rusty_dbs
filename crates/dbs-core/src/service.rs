@@ -1140,7 +1140,7 @@ impl<'a> BackupService<'a> {
                     })
                     .collect(),
                 secret_keys: rc.handshake.secret_keys.clone(),
-                config_schema: Value::Null,
+                config_schema: rc.handshake.config_schema.clone(),
                 auth_capture: rc.handshake.auth_capture.clone(),
             })
             .collect()
@@ -2660,6 +2660,7 @@ mod tests {
                 volatile_fields: Vec::new(),
                 pip_requirements: Vec::new(),
                 needs_playwright_browser: false,
+                config_schema: serde_json::Value::Null,
             },
             command: std::path::PathBuf::from("dbs-connector-test"),
             args: Vec::new(),

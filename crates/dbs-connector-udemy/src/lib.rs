@@ -780,6 +780,43 @@ impl Connector for UdemyConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 100,
+                    "description": "Courses fetched per API page (Udemy's page_size max is 100)."
+                },
+                "course_filter": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Limit the backup to these courses (numeric ids or published slugs). Empty = every enrolled course."
+                },
+                "download_videos": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Download video lectures with yt-dlp (needs UDEMY_COOKIES_FILE). DRM-protected courses are skipped with a warning."
+                },
+                "video_format": {
+                    "type": "string",
+                    "default": "best",
+                    "description": "yt-dlp format selector used for video lecture downloads."
+                },
+                "download_timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 900,
+                    "description": "Abandon a video download after this many seconds without progress; the lecture is skipped with a warning. 0 = no cap."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -1690,6 +1727,23 @@ exit 0"#,
                 "last_accessed_time".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = UdemyConnector::new(UdemyConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in [
+            "page_size",
+            "course_filter",
+            "download_videos",
+            "video_format",
+            "download_timeout",
+        ] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(schema["properties"]["page_size"]["maximum"], 100);
     }
 
     #[test]

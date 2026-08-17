@@ -231,6 +231,12 @@ pub struct Handshake {
     /// `browser_cookies`/`browser_storage_state` capture connector.
     #[serde(default)]
     pub needs_playwright_browser: bool,
+    /// JSON-Schema-shaped description of this connector's own config
+    /// options — see [`crate::connector::Connector::config_schema`].
+    /// `Value::Null` (its `#[serde(default)]`) for a connector that
+    /// doesn't declare one.
+    #[serde(default)]
+    pub config_schema: serde_json::Value,
 }
 
 /// A successfully loaded, contract-valid connector.
@@ -574,6 +580,7 @@ mod tests {
             volatile_fields: Vec::new(),
             pip_requirements: Vec::new(),
             needs_playwright_browser: false,
+            config_schema: serde_json::Value::Null,
         };
         assert!(validate_contract(&h).is_err());
     }
@@ -597,6 +604,7 @@ mod tests {
             volatile_fields: Vec::new(),
             pip_requirements: Vec::new(),
             needs_playwright_browser: false,
+            config_schema: serde_json::Value::Null,
         };
         assert!(validate_contract(&h).is_err());
     }
@@ -620,6 +628,7 @@ mod tests {
             volatile_fields: Vec::new(),
             pip_requirements: Vec::new(),
             needs_playwright_browser: false,
+            config_schema: serde_json::Value::Null,
         };
         let err = validate_contract(&h).unwrap_err();
         assert!(err.contains("incompatible"));
@@ -647,6 +656,7 @@ mod tests {
             volatile_fields: Vec::new(),
             pip_requirements: Vec::new(),
             needs_playwright_browser: false,
+            config_schema: serde_json::Value::Null,
         };
         assert!(validate_contract(&h).is_ok());
     }
@@ -671,6 +681,7 @@ mod tests {
                 volatile_fields: Vec::new(),
                 pip_requirements: Vec::new(),
                 needs_playwright_browser: false,
+                config_schema: serde_json::Value::Null,
             },
             command: PathBuf::from("dbs-connector-raindrop"),
             args: Vec::new(),

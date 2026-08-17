@@ -77,6 +77,7 @@ fn write_handshake(connector: &dyn Connector) {
         "volatile_fields": connector.volatile_fields(),
         "pip_requirements": connector.pip_requirements(),
         "needs_playwright_browser": connector.needs_playwright_browser(),
+        "config_schema": connector.config_schema(),
     });
     println!("{handshake}");
     let _ = std::io::stdout().flush();

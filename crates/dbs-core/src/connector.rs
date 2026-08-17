@@ -186,6 +186,21 @@ pub trait Connector {
         (true, String::new())
     }
 
+    /// JSON-Schema-shaped description of this connector's own
+    /// `[sources.NAME]` options — the same keys `configure` reads out of
+    /// `options` by name, described for a UI to render guided fields
+    /// from instead of requiring hand-written JSON. Standard shape:
+    /// `{"type": "object", "properties": {"key": {"type":
+    /// "string"|"integer"|"number"|"boolean"|"array", "default": ...,
+    /// "description": "..."}}, "required": ["key", ...]}` — the web
+    /// UI's `renderSchemaFields` (`dbs-web/static/app.js`) consumes
+    /// exactly this shape. Default `Value::Null`: most connectors need
+    /// nothing beyond secrets and their own `Default` config, same
+    /// class of connector `configure`'s default no-op already covers.
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
     /// Applies this source's `[sources.NAME]` config (every key not
     /// reserved by `crate::config::SourceConfig`, e.g. `instance` for
     /// `dbs-connector-mastodon` or `feeds` for `dbs-connector-podcast`)

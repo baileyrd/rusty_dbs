@@ -554,6 +554,31 @@ impl Connector for GitHubConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "include_stars": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up your starred repositories."
+                },
+                "include_gists": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up your gists."
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 100,
+                    "description": "Items fetched per API page (GitHub's per_page max is 100)."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -986,6 +1011,17 @@ mod tests {
         assert!(connector.capabilities().requires_auth);
         assert!(!connector.capabilities().supports_native_deletes);
         assert_eq!(connector.volatile_fields(), &["repo".to_string()]);
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = GitHubConnector::new(GitHubConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in ["include_stars", "include_gists", "page_size"] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(schema["properties"]["page_size"]["maximum"], 100);
     }
 
     #[test]

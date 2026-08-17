@@ -522,6 +522,7 @@ mod tests {
                 volatile_fields: Vec::new(),
                 pip_requirements: pip_requirements.to_vec(),
                 needs_playwright_browser,
+                config_schema: serde_json::Value::Null,
             },
         }
     }

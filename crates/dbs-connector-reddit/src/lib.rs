@@ -691,6 +691,55 @@ impl Connector for RedditConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "username": {
+                    "type": "string",
+                    "description": "Optional cross-check: expected u/username of the logged-in \
+                     Reddit account. Saved feeds are owner-only, so this never changes which \
+                     account is actually backed up."
+                },
+                "include_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": ["post", "comment"],
+                    "description": "Saved item kinds to back up (post, comment)."
+                },
+                "max_pages": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 100,
+                    "description": "Maximum saved-listing pages to walk per run."
+                },
+                "delay": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 2.0,
+                    "description": "Seconds to wait between saved-listing page fetches."
+                },
+                "headless": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Run the acquisition browser headless."
+                },
+                "checkpoint_every": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 200,
+                    "description": "Emit a checkpoint after this many items are seen."
+                },
+                "archive_outbound_link": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Best-effort fetch of the outbound link a saved post points \
+                     to (never attempted for comments)."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -1332,6 +1381,27 @@ mod tests {
         assert_eq!(capture.kind, "browser_session");
         assert_eq!(capture.secret_key, "REDDIT_SESSION_DIR");
         assert!(connector.export_profile().is_some());
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = RedditConnector::new(RedditConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in [
+            "username",
+            "include_types",
+            "max_pages",
+            "delay",
+            "headless",
+            "checkpoint_every",
+            "archive_outbound_link",
+        ] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(schema["properties"]["max_pages"]["minimum"], 1);
+        assert_eq!(schema["properties"]["checkpoint_every"]["minimum"], 1);
+        assert_eq!(schema["properties"]["delay"]["minimum"], 0);
     }
 
     #[test]

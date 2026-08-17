@@ -173,6 +173,13 @@ fn main() {
                 "item_kinds": ["item"],
                 "display_name": "Fixture",
                 "description": "test fixture connector",
+                "config_schema": {
+                    "type": "object",
+                    "properties": {
+                        "widget_count": {"type": "integer", "default": 1}
+                    },
+                    "required": ["widget_count"]
+                },
             });
             println!("{handshake}");
         }

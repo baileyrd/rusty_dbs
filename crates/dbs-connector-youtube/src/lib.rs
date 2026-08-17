@@ -511,6 +511,51 @@ impl Connector for YouTubeConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "watch_later": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up the Watch Later (WL) playlist."
+                },
+                "liked": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up the Liked (LL) playlist."
+                },
+                "history": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Back up watch history. Huge and has no timestamps via this route, so it's opt-in."
+                },
+                "playlists": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Discover and back up every playlist you own."
+                },
+                "max_history": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 5000,
+                    "description": "Cap on how many watch history entries to fetch, most recent first."
+                },
+                "extract_timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 600,
+                    "description": "Abandon a list extraction after this many seconds; the run continues with the list marked failed. 0 = no cap."
+                },
+                "cookies_from_browser": {
+                    "type": "string",
+                    "default": null,
+                    "description": "Read cookies directly from a local browser profile (e.g. \"chrome\", \"firefox\", \"vivaldi\", \"edge\") instead of a cookies file."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -1076,6 +1121,25 @@ exit 0"#,
         let capture = connector.auth_capture().unwrap();
         assert_eq!(capture.kind, "browser_cookies");
         assert!(connector.export_profile().is_some());
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = YouTubeConnector::new(YouTubeConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in [
+            "watch_later",
+            "liked",
+            "history",
+            "playlists",
+            "max_history",
+            "extract_timeout",
+            "cookies_from_browser",
+        ] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(schema["properties"]["max_history"]["minimum"], 1);
     }
 
     #[test]

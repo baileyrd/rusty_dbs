@@ -565,6 +565,48 @@ impl Connector for RaindropConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "collection_id": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Raindrop collection ID to back up. 0 = all collections except Trash."
+                },
+                "nested": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Include bookmarks from nested sub-collections of collection_id."
+                },
+                "include_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": TYPES,
+                    "description": "Raindrop item types to back up (e.g. link, article, image, video, document, audio)."
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 50,
+                    "description": "Bookmarks fetched per API page (Raindrop's perpage max is 50)."
+                },
+                "overlap_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 300,
+                    "description": "Re-scan window (seconds) before the last checkpoint, to avoid boundary gaps."
+                },
+                "poll_trash": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Also poll the Trash collection for recently deleted bookmarks."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, serde_json::Value>,
@@ -968,6 +1010,24 @@ mod tests {
         assert_eq!(connector.item_kinds().len(), 6);
         assert!(connector.capabilities().requires_auth);
         assert!(connector.capabilities().supports_native_deletes);
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = RaindropConnector::new(RaindropConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in [
+            "collection_id",
+            "nested",
+            "include_types",
+            "page_size",
+            "overlap_seconds",
+            "poll_trash",
+        ] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(schema["properties"]["page_size"]["maximum"], 50);
     }
 
     #[test]

@@ -499,6 +499,31 @@ impl Connector for SpotifyConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "include_liked_tracks": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up your liked (saved) tracks."
+                },
+                "include_playlists": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up your playlist catalog."
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 50,
+                    "description": "Items fetched per API page (Spotify's limit max is 50)."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -1073,6 +1098,17 @@ mod tests {
                 "tracks".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = SpotifyConnector::new(SpotifyConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in ["include_liked_tracks", "include_playlists", "page_size"] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(schema["properties"]["page_size"]["maximum"], 50);
     }
 
     #[test]
