@@ -67,6 +67,9 @@ yet, so everything so far is under Unreleased.
   as still-open work, caught and corrected as later features shipped.
 - Dead/orphaned helper code removed once its real caller landed instead
   of left unreachable.
+- The web UI's sidebar is reachable again on mobile viewports (≤760px)
+  via a new hamburger toggle — it was previously hidden with no way to
+  reopen it, leaving every page but Overview unreachable on a phone.
 - The web UI no longer shows Windows' raw `\\?\`-prefixed canonicalized
   path in the sidebar footer / API-keys page.
 - The Connectors page now shows an explanatory empty state instead of
