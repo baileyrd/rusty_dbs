@@ -1228,7 +1228,7 @@ impl SqliteStorage {
 
         let sql = format!(
             "SELECT i.*, s.name AS source_name, s.type AS source_type, \
-             (SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, \
+             (SELECT COUNT(*) FROM media m WHERE m.item_id = i.id AND m.data IS NOT NULL) AS media_count, \
              COALESCE(\
                  (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' \
                   ORDER BY m.id LIMIT 1), \
@@ -2862,6 +2862,62 @@ mod tests {
             rows[0]["thumbnail"],
             Value::from("https://example.com/cover.png")
         );
+    }
+
+    /// Regression: the Library table's `MEDIA` column (and the CLI's
+    /// `items` `[N media]` suffix, same `media_count` field) must count
+    /// *stored* media, matching the summary metrics card's `WHERE data
+    /// IS NOT NULL` — not every declared `media` entry regardless of
+    /// whether bytes were ever downloaded (`store_media` off, the
+    /// default, leaves every entry declared-but-empty).
+    #[test]
+    fn browse_items_media_count_excludes_declared_but_unstored_media() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: "https://example.com/cover.png".to_string(),
+            kind: "image".to_string(),
+            filename: None,
+            mime: None,
+            data: None,
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+        let (rows, _) = storage
+            .browse_items(&ExportQuery::default(), None, 10, 0)
+            .unwrap();
+        assert_eq!(rows[0]["media_count"], Value::from(0));
+    }
+
+    #[test]
+    fn browse_items_media_count_counts_media_with_stored_bytes() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: "https://example.com/cover.png".to_string(),
+            kind: "image".to_string(),
+            filename: None,
+            mime: None,
+            data: Some(b"fake-png-bytes".to_vec()),
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], true, 0)
+            .unwrap();
+        let (rows, _) = storage
+            .browse_items(&ExportQuery::default(), None, 10, 0)
+            .unwrap();
+        assert_eq!(rows[0]["media_count"], Value::from(1));
     }
 
     #[test]

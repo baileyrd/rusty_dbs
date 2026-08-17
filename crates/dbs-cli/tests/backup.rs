@@ -65,9 +65,15 @@ fn unknown_source_name_exits_5() {
 #[test]
 fn unregistered_connector_type_surfaces_as_a_config_error() {
     let dir = temp_dir("unregistered-connector");
+    // A synthetic type name, not a real `dbs-connector-*` binary this
+    // repo ships: on Windows, `cargo test` puts this test binary's own
+    // `target/debug` (where a `cargo build --workspace` leaves every
+    // real connector) on the *test process's* `PATH`, and the `dbs`
+    // child spawned below inherits it — a real type like "raindrop"
+    // would genuinely resolve instead of surfacing "not found".
     let config_path = write_config(
         &dir,
-        "[sources.raindrop]\ntype = \"raindrop\"\nenabled = true\n",
+        "[sources.raindrop]\ntype = \"not-a-real-connector\"\nenabled = true\n",
     );
 
     let output = Command::new(dbs_bin())

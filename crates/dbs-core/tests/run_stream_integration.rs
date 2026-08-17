@@ -45,6 +45,38 @@ fn connector(args: &[&str], capabilities: Capabilities) -> RegisteredConnector {
     }
 }
 
+/// Like [`connector`], but with a real, non-empty `secret_keys` — for
+/// tests proving `SubprocessRunner` actually resolves and forwards
+/// declared secrets, not just config/media/download settings.
+fn connector_requiring_secrets(args: &[&str], secret_keys: &[&str]) -> RegisteredConnector {
+    RegisteredConnector {
+        type_: "fixture".to_string(),
+        plugin_id: "rusty_dbs:fixture".to_string(),
+        dist_name: "rusty_dbs".to_string(),
+        is_builtin: true,
+        handshake: Handshake {
+            type_: "fixture".to_string(),
+            core_api_version: CURRENT_API_VERSION,
+            schema_version: 1,
+            capabilities: Capabilities {
+                requires_auth: true,
+                ..Capabilities::default()
+            },
+            secret_keys: secret_keys.iter().map(|s| s.to_string()).collect(),
+            item_kinds: vec!["item".to_string()],
+            display_name: None,
+            description: None,
+            export_profile: None,
+            auth_capture: None,
+            volatile_fields: Vec::new(),
+            pip_requirements: Vec::new(),
+            needs_playwright_browser: false,
+        },
+        command: fixture_path(),
+        args: args.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
 fn open_storage_with_source() -> (SqliteStorage, i64) {
     let mut storage = SqliteStorage::open(":memory:").unwrap();
     storage.migrate().unwrap();
@@ -505,4 +537,143 @@ fn cancelling_mid_run_actually_kills_the_child_instead_of_waiting_for_it() {
          child killed, not wait out the fixture's 1-hour sleep (took {elapsed:?})"
     );
     assert!(matches!(outcome.status, dbs_core::RunStatus::Interrupted));
+}
+
+/// Regression for the bug where a connector's declared secret was
+/// resolved purely from the *process* environment — a value written to
+/// `.env` (the documented, `dbs init`-instructed, web-UI-"API
+/// keys"-page-backed way to configure a token) never reached the
+/// connector subprocess at all, even though `BackupService::doctor`
+/// correctly reported it as set. `SubprocessRunner::run_connector` must
+/// read `.env` itself, not rely on something else having exported it
+/// into the process.
+#[test]
+fn subprocess_runner_resolves_a_declared_secret_from_dot_env() {
+    let dir = std::env::temp_dir().join(format!(
+        "dbs-core-run-stream-dotenv-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("dbs.toml");
+    std::fs::write(
+        &config_path,
+        "[dbs]\ndatabase = \"dbs.sqlite3\"\nexport_dir = \"exports\"\ndownload_root = \"downloads\"\n\n\
+         [sources.fixture-source]\ntype = \"fixture\"\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".env"), "FIXTURE_TOKEN=\"from-dot-env\"\n").unwrap();
+    let cfg = load_config(&config_path).unwrap();
+
+    let (mut storage, source_id) = open_storage_with_source();
+    let run_id = storage
+        .begin_run(source_id, "rusty_dbs:fixture", "incremental", None)
+        .unwrap();
+    let rc = connector_requiring_secrets(&["run", "ok", "1"], &["FIXTURE_TOKEN"]);
+    let runner = SubprocessRunner::new(&cfg);
+
+    let outcome = runner
+        .run_connector(
+            &mut storage,
+            &rc,
+            run_id,
+            source_id,
+            "fixture-source",
+            "incremental",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+
+    let query = dbs_core::ExportQuery {
+        sources: Some(vec!["fixture-source".to_string()]),
+        ..Default::default()
+    };
+    let (rows, _total) = storage.browse_items(&query, None, 10, 0).unwrap();
+    let item_id = rows[0]["id"].as_i64().unwrap();
+    let detail = storage.get_item(item_id).unwrap().unwrap();
+    let echoed = &detail["raw"]["_wire_ctx"];
+    assert_eq!(echoed["secrets"]["FIXTURE_TOKEN"], "from-dot-env");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `.env` wins over the process environment when both declare the same
+/// key — same precedence [`dbs_core::resolve_passphrase`] already
+/// guarantees for the encryption passphrase, so a stale process-level
+/// export can't silently shadow what the user just edited in `.env`.
+/// Uses a process-env key name unique to this test to avoid racing any
+/// other test in this file (`cargo test` runs them concurrently).
+#[test]
+fn subprocess_runner_prefers_dot_env_over_the_process_environment() {
+    let dir = std::env::temp_dir().join(format!(
+        "dbs-core-run-stream-dotenv-precedence-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("dbs.toml");
+    std::fs::write(
+        &config_path,
+        "[dbs]\ndatabase = \"dbs.sqlite3\"\nexport_dir = \"exports\"\ndownload_root = \"downloads\"\n\n\
+         [sources.fixture-source]\ntype = \"fixture\"\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".env"),
+        "RUN_STREAM_TEST_SECRET_PRECEDENCE=\"from-dot-env\"\n",
+    )
+    .unwrap();
+    let cfg = load_config(&config_path).unwrap();
+    // SAFETY: unique key name to this test; no other test in this file
+    // reads or writes it.
+    unsafe {
+        std::env::set_var("RUN_STREAM_TEST_SECRET_PRECEDENCE", "from-process-env");
+    }
+
+    let (mut storage, source_id) = open_storage_with_source();
+    let run_id = storage
+        .begin_run(source_id, "rusty_dbs:fixture", "incremental", None)
+        .unwrap();
+    let rc =
+        connector_requiring_secrets(&["run", "ok", "1"], &["RUN_STREAM_TEST_SECRET_PRECEDENCE"]);
+    let runner = SubprocessRunner::new(&cfg);
+
+    let outcome = runner
+        .run_connector(
+            &mut storage,
+            &rc,
+            run_id,
+            source_id,
+            "fixture-source",
+            "incremental",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+
+    let query = dbs_core::ExportQuery {
+        sources: Some(vec!["fixture-source".to_string()]),
+        ..Default::default()
+    };
+    let (rows, _total) = storage.browse_items(&query, None, 10, 0).unwrap();
+    let item_id = rows[0]["id"].as_i64().unwrap();
+    let detail = storage.get_item(item_id).unwrap().unwrap();
+    let echoed = &detail["raw"]["_wire_ctx"];
+    assert_eq!(
+        echoed["secrets"]["RUN_STREAM_TEST_SECRET_PRECEDENCE"],
+        "from-dot-env"
+    );
+
+    // SAFETY: same key this test set above; nothing else touches it.
+    unsafe {
+        std::env::remove_var("RUN_STREAM_TEST_SECRET_PRECEDENCE");
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

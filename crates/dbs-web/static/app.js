@@ -113,6 +113,7 @@ const TAB_TITLES = {
 
 const LOADERS = {};
 function switchTab(tab) {
+  closeMobileSidebar();
   // "Add source" lives under Sources in the nav.
   const navTab = tab === "add" ? "sources" : tab;
   // Source sub-links all share data-tab="source" — match on the source name too.
@@ -124,6 +125,31 @@ function switchTab(tab) {
     : (TAB_TITLES[tab] || tab);
   if (LOADERS[tab]) LOADERS[tab]();
 }
+$$(".nav-item").forEach((btn) => {
+  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+});
+$$("[data-goto]").forEach((btn) => {
+  btn.addEventListener("click", () => switchTab(btn.dataset.goto));
+});
+
+// --- mobile sidebar (hidden by default under the `max-width: 760px`
+// breakpoint; `.open` on both `.sidebar` and `.sidebar-scrim` reveals it
+// as a slide-in drawer) ------------------------------------------------------
+
+function closeMobileSidebar() {
+  $("#menu-toggle").setAttribute("aria-expanded", "false");
+  document.querySelector(".sidebar").classList.remove("open");
+  $("#sidebar-scrim").classList.remove("open");
+}
+$("#menu-toggle").addEventListener("click", () => {
+  const sidebar = document.querySelector(".sidebar");
+  const open = !sidebar.classList.contains("open");
+  sidebar.classList.toggle("open", open);
+  $("#sidebar-scrim").classList.toggle("open", open);
+  $("#menu-toggle").setAttribute("aria-expanded", String(open));
+});
+$("#sidebar-scrim").addEventListener("click", closeMobileSidebar);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMobileSidebar(); });
 $$(".nav-item").forEach((btn) => {
   btn.addEventListener("click", () => switchTab(btn.dataset.tab));
 });
@@ -996,6 +1022,11 @@ async function loadConnectors() {
   box.innerHTML = "";
   try {
     const items = await api("/api/connectors");
+    if (!items.length) {
+      box.append(el("div", { className: "muted hint-line", textContent:
+        "No connectors discovered. Connector binaries (dbs-connector-<type>) must be on PATH, or dbs.toml's [dbs] connectors_dir must point at the directory that holds them — see `dbs connectors list -v` for load failures." }));
+      return;
+    }
     items.forEach((c) => {
       const caps = el("div", { className: "caps" });
       Object.entries(c.capabilities).forEach(([k, v]) => {
@@ -1184,7 +1215,12 @@ async function loadSecrets() {
     const data = await api("/api/secrets");
     $("#secrets-envpath").textContent = data.env_file;
 
-    if (!data.secrets.length) {
+    if (data.unresolved_source_types && data.unresolved_source_types.length) {
+      box.append(el("div", { className: "tag st-partial", textContent:
+        `Can't tell which keys ${data.unresolved_source_types.join(", ")} need — no matching connector is discovered ` +
+        "(check PATH / dbs.toml's connectors_dir, and see the Connectors tab)." }));
+    }
+    if (!data.secrets.length && !(data.unresolved_source_types && data.unresolved_source_types.length)) {
       box.append(el("div", { className: "muted hint-line", textContent: "None of your configured sources require an API key." }));
     }
     data.secrets.forEach((s) => {

@@ -140,7 +140,7 @@ async fn meta(State(state): State<AppState>) -> Json<Value> {
             .config
             .source_path
             .as_deref()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(dbs_core::display_path)
             .unwrap_or_default(),
         "setup_enabled": state.allow_setup,
         "scheduler_enabled": state.scheduler_enabled,
@@ -689,6 +689,13 @@ fn allowed_secret_keys(
 /// any *registered* connector declares, configured or not — the wider
 /// list `loadSecrets`' "Set another key" picker draws from. `env_file`
 /// is the `.env` path being read/written, shown as-is in the UI.
+/// `unresolved_source_types` is every distinct `type` a configured
+/// source names that no discovered connector answers to — an empty
+/// `secrets` list is ambiguous between "genuinely nothing needs a key"
+/// and "the connector registry couldn't resolve this source's type at
+/// all" (e.g. the binary isn't on `PATH`/`connectors_dir`), and only
+/// this field lets `loadSecrets` tell the two apart instead of quietly
+/// claiming no key is required.
 async fn secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let config = state.config.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
@@ -706,6 +713,15 @@ async fn secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError>
                     .push(name.clone());
             }
         }
+
+        let mut unresolved_types: Vec<&str> = config
+            .sources
+            .values()
+            .map(|sc| sc.type_.as_str())
+            .filter(|t| !keys_by_type.contains_key(*t))
+            .collect();
+        unresolved_types.sort_unstable();
+        unresolved_types.dedup();
 
         let env_path = config.env_file_path();
         let in_env_file = crate::envfile::read_keys(&env_path);
@@ -727,9 +743,10 @@ async fn secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError>
             .collect();
 
         Ok(json!({
-            "env_file": env_path.to_string_lossy(),
+            "env_file": dbs_core::display_path(&env_path),
             "secrets": secrets,
             "allowed": allowed,
+            "unresolved_source_types": unresolved_types,
         }))
     })
     .await

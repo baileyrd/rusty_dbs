@@ -1917,7 +1917,15 @@ mod tests {
     // JSON result contract between the Python script and this Rust
     // code is tested without needing real Python, Playwright, or
     // network access. -----------------------------------------------
-
+    //
+    // `write_stub_script`/the tests below write a `#!/bin/sh` script and
+    // hardcode `"/bin/sh"` as the interpreter, relying on the OS to honor
+    // the shebang and the executable bit -- a kernel `exec()` feature
+    // Windows doesn't have, and a path that doesn't exist there at all.
+    // `acquire_using` itself is fully cross-platform (it execs whatever
+    // interpreter/script path it's given); only these fixtures are
+    // Unix-only, matching the same constraint on `dbs-web`'s tests.
+    #[cfg(unix)]
     fn write_stub_script(dir: &std::path::Path, stdout: &str, exit_code: i32) -> PathBuf {
         let path = dir.join("stub.sh");
         let body = format!("#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\nexit {exit_code}\n");
@@ -1930,6 +1938,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_parses_a_successful_communities_result() {
         let dir = temp_dir("acquire-communities-ok");
@@ -1953,6 +1962,7 @@ mod tests {
         assert_eq!(communities[0]["slug"], "chase-ai");
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_parses_a_successful_courses_result() {
         let dir = temp_dir("acquire-courses-ok");
@@ -1976,6 +1986,7 @@ mod tests {
         assert_eq!(courses[0]["course_slug"], "c1");
     }
 
+    #[cfg(unix)]
     fn acquire_with_error_kind(dir: &std::path::Path, kind: &str) -> Result<Value, ConnectorError> {
         let script = write_stub_script(
             dir,
@@ -1993,6 +2004,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_maps_each_error_kind_to_the_matching_connector_error() {
         let dir = temp_dir("acquire-errors");
@@ -2014,6 +2026,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_passes_mode_and_payload_through_as_positional_arguments() {
         let dir = temp_dir("acquire-args");
@@ -2056,6 +2069,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_using_treats_unparseable_output_as_transient() {
         let dir = temp_dir("acquire-garbage");

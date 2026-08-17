@@ -1417,6 +1417,15 @@ mod tests {
         assert!(lecture.media.is_empty());
     }
 
+    // `write_fake_yt_dlp` writes a `#!/bin/sh` script and relies on the
+    // OS (not the connector's download path) to honor the shebang and
+    // the executable bit set below — a kernel `exec()` feature Windows
+    // doesn't have (a `.sh` file there just fails to launch: "%1 is not
+    // a valid Win32 application"). The connector's subprocess launcher
+    // itself is fully cross-platform (it always execs the configured
+    // yt-dlp binary path directly); only this test's own script-writing
+    // fixture is Unix-only.
+    #[cfg(unix)]
     #[test]
     fn download_videos_downloads_via_yt_dlp_when_cookies_file_exists() {
         let mut server = mockito::Server::new();

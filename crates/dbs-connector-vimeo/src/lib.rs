@@ -1004,6 +1004,9 @@ mod tests {
         assert_eq!(item.media[1].url, "https://vimeo.com/1");
     }
 
+    // Relies on the OS honoring `#!/bin/sh` shebang execution, a Unix-only
+    // kernel feature; the yt-dlp invocation itself is fully cross-platform.
+    #[cfg(unix)]
     #[test]
     fn download_videos_downloads_via_yt_dlp_and_prefers_the_local_path() {
         let mut server = mockito::Server::new();

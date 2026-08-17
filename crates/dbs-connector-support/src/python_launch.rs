@@ -168,6 +168,20 @@ mod tests {
         }
     }
 
+    // `write_stub_script` writes a `#!/bin/sh` script and relies on
+    // the interpreter path `/bin/sh` existing and the OS honoring the
+    // shebang/executable bit set below — a kernel `exec()` feature
+    // Windows doesn't have (a Unix absolute path like `/bin/sh` isn't
+    // even resolvable there, and a `.sh` file just fails to launch:
+    // "%1 is not a valid Win32 application"). `run_python_script_using`
+    // itself is fully cross-platform (it always execs the given
+    // interpreter/argv directly, e.g. a real `python3` in production);
+    // only these tests' own `/bin/sh` fixture is Unix-only. The
+    // missing-interpreter test below doesn't need gating: it asserts a
+    // spawn error for a bogus absolute path, which fails the same way
+    // on every platform regardless of whether the script it never
+    // reaches would run.
+    #[cfg(unix)]
     #[test]
     fn run_python_script_using_captures_stdout_and_a_zero_exit_code() {
         let dir = temp_dir("stdout");
@@ -181,6 +195,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_python_script_using_captures_a_nonzero_exit_code() {
         let dir = temp_dir("exit-code");
@@ -191,6 +206,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "boom");
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_python_script_using_passes_arguments_through() {
         let dir = temp_dir("args");
@@ -221,6 +237,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_python_script_using_abandons_a_stalled_process_past_its_timeout() {
         let dir = temp_dir("timeout");
@@ -232,6 +249,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_python_script_using_with_a_zero_timeout_runs_inline_to_completion() {
         let dir = temp_dir("zero-timeout");

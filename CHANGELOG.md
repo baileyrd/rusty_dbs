@@ -71,5 +71,27 @@ yet, so everything so far is under Unreleased.
   referencing an unrelated product) replaced with a neutral one,
   consistently across the web UI placeholder, `dbs research`'s `--help`
   text, and its own tests.
+- The Library table's `MEDIA` count (and the CLI's `dbs items` `[N
+  media]` suffix) now counts stored media only, matching the summary
+  card and item detail panel — previously it counted every declared
+  media entry even when nothing was actually downloaded.
+- The web UI's sidebar is reachable again on mobile viewports (≤760px)
+  via a new hamburger toggle — it was previously hidden with no way to
+  reopen it, leaving every page but Overview unreachable on a phone.
+- The web UI no longer shows Windows' raw `\\?\`-prefixed canonicalized
+  path in the sidebar footer / API-keys page.
+- The Connectors page now shows an explanatory empty state instead of
+  silently rendering nothing when no connectors are discoverable; the
+  API-keys page no longer claims "none required" when it actually
+  couldn't resolve a configured source's connector type.
+- A connector's `.env`-configured secret (`token_env`) now actually
+  reaches the connector subprocess — it was previously resolved from
+  the process environment only, so a token written via `dbs init`'s
+  documented flow or the web UI's "API keys" page never worked despite
+  `dbs doctor` reporting it as set.
+- Test suite made deterministic on Windows: connector-discovery tests no
+  longer depend on the host's ambient `PATH`/an unbuilt workspace, and
+  Unix-only subprocess fixtures (`#!/bin/sh` scripts) are properly gated
+  instead of failing outright.
 
 ### Security
