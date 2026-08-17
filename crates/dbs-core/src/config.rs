@@ -212,6 +212,26 @@ impl Config {
     }
 }
 
+/// Renders `path` the way a user typed/expects it, undoing the Windows
+/// extended-length ("verbatim") prefix (`\\?\C:\...` / `\\?\UNC\server\
+/// share\...`) that [`Path::canonicalize`] adds on that platform — the
+/// prefix is exactly what lets file I/O exceed `MAX_PATH` and is
+/// required for that, so [`load_config`]'s `source_path`/`base_dir`
+/// keep it internally; this is a *display-only* transform for surfacing
+/// a path in the UI (`dbs-web`'s `/api/meta` and `/api/secrets`). A
+/// no-op on any path that doesn't carry the prefix, including every path
+/// on a non-Windows OS.
+pub fn display_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.into_owned()
+    }
+}
+
 fn shellexpand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME") {
@@ -763,5 +783,33 @@ mod tests {
         assert_eq!(expand_env_str("no reference here"), "no reference here");
         assert_eq!(expand_env_str("${}"), "${}");
         assert_eq!(expand_env_str("$NOT_BRACED"), "$NOT_BRACED");
+    }
+
+    #[test]
+    fn display_path_strips_windows_verbatim_drive_prefix() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\dev\dbs-smoke\dbs.toml")),
+            r"C:\dev\dbs-smoke\dbs.toml"
+        );
+    }
+
+    #[test]
+    fn display_path_strips_windows_verbatim_unc_prefix() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\dbs.toml")),
+            r"\\server\share\dbs.toml"
+        );
+    }
+
+    #[test]
+    fn display_path_leaves_ordinary_paths_untouched() {
+        assert_eq!(
+            display_path(Path::new("/home/user/dbs.toml")),
+            "/home/user/dbs.toml"
+        );
+        assert_eq!(
+            display_path(Path::new(r"C:\dev\dbs.toml")),
+            r"C:\dev\dbs.toml"
+        );
     }
 }

@@ -996,6 +996,11 @@ async function loadConnectors() {
   box.innerHTML = "";
   try {
     const items = await api("/api/connectors");
+    if (!items.length) {
+      box.append(el("div", { className: "muted hint-line", textContent:
+        "No connectors discovered. Connector binaries (dbs-connector-<type>) must be on PATH, or dbs.toml's [dbs] connectors_dir must point at the directory that holds them — see `dbs connectors list -v` for load failures." }));
+      return;
+    }
     items.forEach((c) => {
       const caps = el("div", { className: "caps" });
       Object.entries(c.capabilities).forEach(([k, v]) => {
@@ -1184,7 +1189,12 @@ async function loadSecrets() {
     const data = await api("/api/secrets");
     $("#secrets-envpath").textContent = data.env_file;
 
-    if (!data.secrets.length) {
+    if (data.unresolved_source_types && data.unresolved_source_types.length) {
+      box.append(el("div", { className: "tag st-partial", textContent:
+        `Can't tell which keys ${data.unresolved_source_types.join(", ")} need — no matching connector is discovered ` +
+        "(check PATH / dbs.toml's connectors_dir, and see the Connectors tab)." }));
+    }
+    if (!data.secrets.length && !(data.unresolved_source_types && data.unresolved_source_types.length)) {
       box.append(el("div", { className: "muted hint-line", textContent: "None of your configured sources require an API key." }));
     }
     data.secrets.forEach((s) => {
