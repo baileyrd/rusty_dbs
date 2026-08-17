@@ -49,9 +49,12 @@
 //! [`SubprocessRunner`] is the production [`crate::service::ConnectorRunner`]
 //! this module exists to supply, replacing
 //! [`crate::service::UnimplementedRunner`] in `dbs-cli`. It resolves a
-//! connector's declared `secret_keys` from the process environment (the
-//! *only* values that cross the boundary — "a subprocess literally
-//! cannot read a secret it wasn't handed on stdin," per ADR-0001) and a
+//! connector's declared `secret_keys` from `.env` first, falling back to
+//! the process environment (same precedence as
+//! [`crate::crypto::resolve_passphrase`]/[`crate::service::BackupService::doctor`]'s
+//! `secret_store`) — those are the *only* values that cross the
+//! boundary, handed to the child on its stdin ("a subprocess literally
+//! cannot read a secret it wasn't handed," per ADR-0001) — and a
 //! source's `store_media`/`max_media_mb`/download directory/`options`
 //! (per-source connector config, ADR-0002) from [`crate::config::Config`].
 //!
@@ -76,7 +79,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancelToken;
-use crate::config::Config;
+use crate::config::{parse_env_file, Config};
 use crate::engine::{prepare, sweep_deletions};
 use crate::errors::{ConnectorError, DbsError};
 use crate::models::{Cursor, FetchEvent, RunStatus};
@@ -519,9 +522,14 @@ fn write_context(child: &mut Child, wire_ctx: &WireRunContext) -> std::io::Resul
 }
 
 /// Production [`ConnectorRunner`]: resolves a connector's declared
-/// secrets from the process environment and a source's media/download
-/// settings from `config`, then drives [`run_connector_subprocess`].
-/// See the module doc-comment for what this doesn't yet cover.
+/// secrets from `.env` first, falling back to the process environment
+/// — same precedence as [`crate::crypto::resolve_passphrase`] — and a
+/// source's media/download settings from `config`, then drives
+/// [`run_connector_subprocess`]. `.env` is re-read fresh on every run
+/// rather than cached: a `dbs serve` process doesn't restart when the
+/// web UI's "API keys" page writes a new value, so the very next run
+/// must still see it. See the module doc-comment for what this doesn't
+/// yet cover.
 pub struct SubprocessRunner<'a> {
     config: &'a Config,
 }
@@ -547,11 +555,23 @@ impl ConnectorRunner for SubprocessRunner<'_> {
         limit: Option<u32>,
         cancel: Option<&CancelToken>,
     ) -> Result<ConnectorRunOutcome, DbsError> {
+        // Re-read `.env` on every run rather than caching it on `self`:
+        // it's a handful of lines, read once per source per backup, and
+        // a value the web UI's "API keys" page just wrote must be
+        // visible to the very next run without restarting the server.
+        let env_file = parse_env_file(&self.config.env_file_path());
         let secrets: HashMap<String, String> = connector
             .handshake
             .secret_keys
             .iter()
-            .filter_map(|key| std::env::var(key).ok().map(|v| (key.clone(), v)))
+            .filter_map(|key| {
+                let value = env_file
+                    .get(key)
+                    .filter(|v| !v.is_empty())
+                    .cloned()
+                    .or_else(|| std::env::var(key).ok().filter(|v| !v.is_empty()));
+                value.map(|v| (key.clone(), v))
+            })
             .collect();
         let sc = self.config.sources.get(source_name);
         let store_media = sc.is_some_and(|s| s.store_media);

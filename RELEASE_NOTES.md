@@ -8,6 +8,37 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Resolve connector secrets from `.env`, not just the process environment (closes #262)
+**2026-08-17**
+
+`SubprocessRunner::run_connector` resolved a connector's declared
+`secret_keys` purely via `std::env::var(key)` — the real OS process
+environment — with no reference to `.env` at all. Every other secret
+consumer in the codebase (`BackupService::doctor`,
+`crypto::resolve_passphrase`, `BackupService::restore`) correctly
+threads a `secret_store` map parsed from `.env`; this one call site was
+never wired the same way. Result: the entire documented setup flow was
+broken — `dbs init`'s own printed instructions, the generated
+`dbs.toml`'s `token_env` comments, ADR-0001's stated design ("secrets
+... live in `.env`"), and the web UI's whole "API keys" page all assume
+a `.env` value reaches the connector, and none of them did. `dbs
+doctor` made it worse by correctly reading `.env` and reporting a
+secret "set" right before the same backup failed with "required secret
+is not set in the environment."
+
+Fixed by reading `.env` (via `parse_env_file(&self.config
+.env_file_path())`) fresh on every `run_connector` call, preferring it
+over the process environment when both are set — the same precedence
+`resolve_passphrase` already guarantees. Reads it fresh rather than
+caching: `dbs serve` doesn't restart when the web UI's "API keys" page
+writes a new value, so the very next run must see it. 2 new
+integration tests in `dbs-core/tests/run_stream_integration.rs`,
+exercising the real subprocess boundary end to end via
+`test_connector_fixture`: a secret arriving purely from `.env`, and
+`.env` winning over a conflicting process-env value.
+
+---
+
 ## Make the test suite deterministic on Windows
 **2026-08-16**
 
