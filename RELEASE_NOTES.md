@@ -8,6 +8,47 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Author real `config_schema` for every connector that reads options (closes #274)
+**2026-08-17**
+
+`Connector::config_schema` (`dbs-core/src/connector.rs`) previously had no
+implementations, so `dbs-web`'s `/api/connectors` handler always reported
+`config_schema: null` and the Add Source form's guided fields (`#add-schema`
+in `static/app.js`, wired since #172/#173) never rendered anything -
+"None of your configured sources require an API key" was accurate by
+coincidence, but every connector's real options (raindrop's `page_size`,
+reddit's `max_pages`, youtube's `watch_later`, etc.) were only settable by
+hand-writing JSON into the Advanced textarea.
+
+Added `fn config_schema(&self) -> serde_json::Value` overrides to the 13
+connectors whose `configure()` reads options from the source's `[sources.NAME]`
+block (bluesky, github, mastodon, pocketcasts, podcast, raindrop, readwise,
+reddit, skool, spotify, udemy, vimeo, youtube), each describing exactly the
+keys `configure()` reads, with the same type/bounds/defaults `configure()`
+enforces. `pinboard` has no configurable options (its `configure()` is the
+trait's default no-op) and correctly keeps the trait's default `Value::Null`.
+Threaded the field through the wire protocol
+(`dbs-connector-support::subprocess_main::write_handshake`,
+`dbs_core::registry::Handshake`) and `BackupService::list_connectors`
+(previously hardcoded `config_schema: Value::Null`) so the real schema
+reaches the API instead of being dropped at the host boundary.
+
+Verified live: the Add Source form now renders typed inputs (number/text/
+checkbox) with description tags for every schema property and pre-fills
+each connector's real default, while a connector with no schema (pinboard)
+falls back cleanly to just the Advanced JSON textarea.
+
+### Fixed
+- `config_schema` was a real field in `ConnectorInfo`/`Handshake` since #49's
+  era but no connector ever populated it - the web UI's whole guided-config
+  code path (`renderSchemaFields`) was dead code exercised only by tests
+  against a fixture connector.
+
+### Security
+- None.
+
+---
+
 ## Remove the duplicate nav-wiring block that double-fired every tab's loader (closes #271)
 **2026-08-17**
 

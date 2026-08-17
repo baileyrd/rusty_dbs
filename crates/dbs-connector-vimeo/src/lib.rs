@@ -624,6 +624,42 @@ impl Connector for VimeoConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 100,
+                    "description": "Videos requested per API page (Vimeo max is 100)."
+                },
+                "download_videos": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Off by default: the catalog IS the backup, and API download links need a paid plan. On, video bytes are pulled with yt-dlp (works for your public videos on any plan) into the source's download folder."
+                },
+                "downloads_dir": {
+                    "type": "string",
+                    "description": "Where downloaded video files land. Unset defaults to the engine's per-source download folder."
+                },
+                "video_quality": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 1080,
+                    "description": "Cap the selected variant's height (e.g. 1080, 720). 0 = best available."
+                },
+                "video_stall_timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 180,
+                    "description": "Abandon a video download after this many seconds without progress; retried on a later run. 0 = no watchdog."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -1195,6 +1231,23 @@ exit 0"#,
             &["stats".to_string(), "metadata".to_string()]
         );
         assert!(connector.export_profile().is_some());
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = VimeoConnector::new(VimeoConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in [
+            "page_size",
+            "download_videos",
+            "downloads_dir",
+            "video_quality",
+            "video_stall_timeout",
+        ] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(schema["properties"]["page_size"]["maximum"], 100);
     }
 
     #[test]

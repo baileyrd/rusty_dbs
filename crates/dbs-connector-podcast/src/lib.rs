@@ -519,6 +519,20 @@ impl Connector for PodcastConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "feeds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "RSS/podcast feed URLs to back up."
+                }
+            }
+        })
+    }
+
     /// Reads `feeds` from this source's `[sources.NAME]` config
     /// (ADR-0002) — unlike every other connector wired up so far, this
     /// one has no separate "host" field at all; the feed URL list *is*
@@ -1037,5 +1051,14 @@ mod tests {
         assert!(!connector.capabilities().supports_full_enumeration);
         assert!(connector.capabilities().produces_media);
         assert!(connector.export_profile().is_some());
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = PodcastConnector::new(PodcastConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("feeds"), "missing schema key: feeds");
+        assert_eq!(schema["properties"]["feeds"]["items"]["type"], "string");
     }
 }

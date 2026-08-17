@@ -61,6 +61,10 @@ yet, so everything so far is under Unreleased.
   subprocess's real HTTP client instead of being parsed and unused.
 - `[dbs] batch_max` now drives the engine's actual commit-flush cadence,
   replacing a previously hardcoded constant.
+- Every connector whose `configure()` reads options from `[sources.NAME]`
+  now declares a real `config_schema` (was always `null`), so the web UI's
+  Add Source form renders typed guided fields with descriptions and
+  defaults instead of requiring hand-written JSON in the Advanced textarea.
 
 ### Fixed
 - Several rounds of stale doc-comments describing already-landed wiring

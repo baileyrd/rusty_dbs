@@ -254,6 +254,19 @@ impl Connector for BlueskyConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "default": "",
+                    "description": "The Bluesky handle or DID to authenticate as."
+                }
+            }
+        })
+    }
+
     /// Reads `identifier` (the handle or DID to authenticate as) from
     /// this source's `[sources.NAME]` config (ADR-0002). Unlike
     /// `instance`/`feeds` on the mastodon/podcast connectors, an empty
@@ -786,5 +799,17 @@ mod tests {
         assert!(connector.capabilities().requires_auth);
         assert!(!connector.capabilities().supports_incremental);
         assert!(!connector.capabilities().supports_native_deletes);
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = BlueskyConnector::new(BlueskyConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("identifier"),
+            "missing schema key: identifier"
+        );
+        assert_eq!(schema["properties"]["identifier"]["type"], "string");
     }
 }

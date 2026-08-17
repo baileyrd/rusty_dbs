@@ -33,6 +33,21 @@ fn discover_loads_a_valid_connector() {
     assert!(report.failures.is_empty());
     assert_eq!(report.loaded[0].type_, "raindrop");
     assert_eq!(report.loaded[0].plugin_id, "rusty_dbs:raindrop");
+    // The wire-protocol `config_schema` field (issue #274) round-trips
+    // from the subprocess handshake into the loaded connector's
+    // `Handshake`, not just the fields the reference protocol always
+    // had - a UI/CLI consumer must see whatever schema the connector
+    // declared, not a hardcoded null.
+    assert_eq!(
+        report.loaded[0].handshake.config_schema,
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "widget_count": {"type": "integer", "default": 1}
+            },
+            "required": ["widget_count"]
+        })
+    );
 
     assert!(registry.get("raindrop").is_some());
     assert!(registry.get("rusty_dbs:raindrop").is_some());

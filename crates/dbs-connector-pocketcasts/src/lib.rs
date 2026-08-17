@@ -356,6 +356,29 @@ impl Connector for PocketCastsConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "include_subscriptions": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up the account's current podcast subscriptions."
+                },
+                "include_starred": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up starred episodes."
+                },
+                "include_history": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up listening history."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -854,6 +877,24 @@ mod tests {
         assert_eq!(
             connector.volatile_fields(),
             &["playedUpTo".to_string(), "playingStatus".to_string()]
+        );
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = PocketCastsConnector::new(PocketCastsConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in [
+            "include_subscriptions",
+            "include_starred",
+            "include_history",
+        ] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(
+            schema["properties"]["include_subscriptions"]["default"],
+            true
         );
     }
 

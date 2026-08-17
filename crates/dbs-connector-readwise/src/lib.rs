@@ -413,6 +413,35 @@ impl Connector for ReadwiseConnector {
         }
     }
 
+    /// JSON-Schema-shaped description of this connector's own
+    /// `[sources.NAME]` options -- the same keys `configure` reads out
+    /// of `options` by name, described for a UI to render guided
+    /// fields from instead of requiring hand-written JSON.
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "include_books": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up books/articles."
+                },
+                "include_highlights": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Back up highlights."
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "default": 1000,
+                    "description": "API page size (Readwise's max is 1000)."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -977,6 +1006,17 @@ mod tests {
         assert!(connector.capabilities().requires_auth);
         assert!(connector.capabilities().paginated);
         assert!(!connector.capabilities().supports_native_deletes);
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = ReadwiseConnector::new(ReadwiseConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in ["include_books", "include_highlights", "page_size"] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
+        assert_eq!(schema["properties"]["page_size"]["maximum"], 1000);
     }
 
     #[test]

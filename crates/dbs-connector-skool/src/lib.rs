@@ -1104,6 +1104,32 @@ impl Connector for SkoolConnector {
         }
     }
 
+    fn config_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "communities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Communities to back up, by title or slug. Empty = auto-discover your joined communities."
+                },
+                "courses": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Courses to back up, by title or slug, optionally scoped as \"community/course\". Empty = every course in the selected communities."
+                },
+                "no_download_communities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Communities to catalog only (metadata, no downloads), by title or slug."
+                }
+            }
+        })
+    }
+
     fn configure(
         &mut self,
         options: &std::collections::HashMap<String, Value>,
@@ -1838,6 +1864,16 @@ mod tests {
         let capture = connector.auth_capture().unwrap();
         assert_eq!(capture.kind, "browser_session");
         assert_eq!(capture.secret_key, "SKOOL_SESSION_DIR");
+    }
+
+    #[test]
+    fn config_schema_describes_every_key_configure_reads() {
+        let connector = SkoolConnector::new(SkoolConfig::default());
+        let schema = connector.config_schema();
+        let props = schema["properties"].as_object().unwrap();
+        for key in ["communities", "courses", "no_download_communities"] {
+            assert!(props.contains_key(key), "missing schema key: {key}");
+        }
     }
 
     // -- configure: communities/courses/no_download_communities from a
