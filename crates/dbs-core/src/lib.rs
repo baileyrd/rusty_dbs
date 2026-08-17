@@ -32,7 +32,8 @@ pub mod versioning;
 pub use cancel::CancelToken;
 pub use capabilities::{AuthCapture, Capabilities, ItemKind};
 pub use config::{
-    load_config, parse_env_file, Config, ConnectorOverride, NotifyOn, SourceConfig, VpnGuard,
+    display_path, load_config, parse_env_file, Config, ConnectorOverride, NotifyOn, SourceConfig,
+    VpnGuard,
 };
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
 pub use crypto::{

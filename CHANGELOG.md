@@ -67,6 +67,12 @@ yet, so everything so far is under Unreleased.
   as still-open work, caught and corrected as later features shipped.
 - Dead/orphaned helper code removed once its real caller landed instead
   of left unreachable.
+- The web UI no longer shows Windows' raw `\\?\`-prefixed canonicalized
+  path in the sidebar footer / API-keys page.
+- The Connectors page now shows an explanatory empty state instead of
+  silently rendering nothing when no connectors are discoverable; the
+  API-keys page no longer claims "none required" when it actually
+  couldn't resolve a configured source's connector type.
 - A connector's `.env`-configured secret (`token_env`) now actually
   reaches the connector subprocess — it was previously resolved from
   the process environment only, so a token written via `dbs init`'s

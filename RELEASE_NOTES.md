@@ -8,6 +8,40 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Fix Windows path display and connector-discovery onboarding UX
+**2026-08-17**
+
+Found while driving a live `dbs serve` instance end to end (a browser-driven
+walkthrough of every tab, dark/light theme, exports, and a real backup run):
+
+1. **Raw Windows verbatim path leaked into the UI.** `load_config`'s
+   `path.canonicalize()` returns a `\\?\`-prefixed extended-length path on
+   Windows; that value flowed straight into `/api/meta`'s `config_path` and
+   `/api/secrets`' `env_file`, so the sidebar footer and API-keys page showed
+   `\\?\C:\dev\...\dbs.toml` on every screen instead of a normal path.
+   Added `dbs_core::config::display_path()` (strips the prefix; a no-op on
+   any other path/OS) and used it at both display sites — the canonicalized
+   path itself is unchanged for actual file I/O, only the string shown to
+   the user is affected.
+2. **Connectors page had no empty state.** With zero connectors discoverable
+   (the default for a fresh `dbs init` — nothing on `PATH`, no
+   `connectors_dir` configured), the page silently rendered nothing instead
+   of an explanatory message, unlike every other page in the app. Added one.
+3. **API keys page contradicted a failed backup.** With connectors
+   undiscoverable, `/api/secrets` couldn't resolve a configured source's
+   type to its declared secret keys, so the page confidently said "None of
+   your configured sources require an API key" — directly contradicting a
+   backup that had just failed on a missing secret for that exact source.
+   `/api/secrets` now reports `unresolved_source_types` (configured types
+   with no matching discovered connector); the UI shows a distinct warning
+   instead of the misleading "none required" message when any exist.
+4. Generated `dbs.toml` now documents `connectors_dir`/`PATH` discovery and
+   `dbs connectors list -v` right where a fresh `dbs init` leaves it, and
+   the Notes-export "Output directory" field's placeholder is
+   platform-neutral instead of POSIX-only.
+
+---
+
 ## Resolve connector secrets from `.env`, not just the process environment (closes #262)
 **2026-08-17**
 
