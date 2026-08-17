@@ -67,6 +67,10 @@ yet, so everything so far is under Unreleased.
   as still-open work, caught and corrected as later features shipped.
 - Dead/orphaned helper code removed once its real caller landed instead
   of left unreachable.
+- A duplicated event-listener block was making every sidebar/nav click
+  fire the target tab's data loader twice — doubling every API call and
+  visibly duplicating rendered content on the Connectors, Library,
+  Research, and API-keys pages.
 - The research feature's example topic (`"claude code skills"`,
   referencing an unrelated product) replaced with a neutral one,
   consistently across the web UI placeholder, `dbs research`'s `--help`

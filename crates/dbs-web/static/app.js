@@ -150,12 +150,6 @@ $("#menu-toggle").addEventListener("click", () => {
 });
 $("#sidebar-scrim").addEventListener("click", closeMobileSidebar);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMobileSidebar(); });
-$$(".nav-item").forEach((btn) => {
-  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
-});
-$$("[data-goto]").forEach((btn) => {
-  btn.addEventListener("click", () => switchTab(btn.dataset.goto));
-});
 
 // --- theme -------------------------------------------------------------------
 
