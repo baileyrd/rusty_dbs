@@ -777,6 +777,11 @@ mod tests {
         assert_eq!(registry.all().len(), 1);
     }
 
+    // Only used by the two `#[cfg(unix)]` tests below, which rely on
+    // `write_executable`'s `#!/bin/sh` + executable-bit fixture — a
+    // Unix-only mechanism (`is_executable_file`'s Windows branch
+    // requires a real `.exe`, which a plain shell script isn't).
+    #[cfg(unix)]
     fn scan_temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "dbs-core-registry-scan-test-{label}-{}-{:?}",

@@ -72,5 +72,9 @@ yet, so everything so far is under Unreleased.
   the process environment only, so a token written via `dbs init`'s
   documented flow or the web UI's "API keys" page never worked despite
   `dbs doctor` reporting it as set.
+- Test suite made deterministic on Windows: connector-discovery tests no
+  longer depend on the host's ambient `PATH`/an unbuilt workspace, and
+  Unix-only subprocess fixtures (`#!/bin/sh` scripts) are properly gated
+  instead of failing outright.
 
 ### Security

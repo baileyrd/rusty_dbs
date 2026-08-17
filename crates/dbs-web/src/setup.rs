@@ -397,6 +397,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn write_script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         let mut f = std::fs::File::create(&path).unwrap();
@@ -410,6 +411,16 @@ mod tests {
         path
     }
 
+    // `write_script` writes a `#!/bin/sh` script and relies on the OS
+    // (not `run_commands`) to honor the shebang and the executable bit
+    // set below — a kernel `exec()` feature Windows doesn't have (a
+    // `.sh` file there just fails to launch: "%1 is not a valid Win32
+    // application"). `run_commands` itself is fully cross-platform (it
+    // always execs the given argv directly, e.g. real `python`/`pip` in
+    // production); only this test's own script-writing fixture is
+    // Unix-only, matching the same constraint on the connector-fixture
+    // tests in `lib.rs`.
+    #[cfg(unix)]
     #[test]
     fn run_commands_streams_output_and_reports_ok_on_success() {
         let dir = temp_dir("run-ok");
@@ -430,6 +441,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_commands_stops_at_the_first_failing_step_with_a_clear_error() {
         let dir = temp_dir("run-fail");
@@ -514,6 +526,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_install_job_emits_lines_and_succeeds_through_a_real_job() {
         let dir = temp_dir("install-job");

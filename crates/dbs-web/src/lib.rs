@@ -229,6 +229,66 @@ pub async fn serve(
     axum::serve(listener, router(token, opts)).await
 }
 
+/// `cargo test` on Windows prepends this crate's own build-output
+/// directory (`target/debug`, where this test binary's siblings land)
+/// to the *test process's* `PATH`, so a dynamically-linked test binary
+/// can resolve DLLs there — nothing to do with this crate's own logic.
+/// After a `cargo build --workspace`, that same directory holds every
+/// real `dbs-connector-*` binary this repo ships (they're plain sibling
+/// executables in the same build output). Any test that builds a
+/// `Config` with `connectors_dir: None` and expects a small, known
+/// connector set — or none at all — inherits that injected entry too:
+/// `dbs_core::connector_search_dirs` correctly also scans `PATH`
+/// (matching real `dbs serve`/`dbs backup` behavior), so
+/// `ConnectorRegistry::discover` spawns and handshakes with all ~13 of
+/// them for real. That's genuine extra process-spawn latency no
+/// fixture-only test should pay, easily enough under this binary's
+/// normal thread-parallel test load to blow past a poll loop sized for
+/// "near-instant" work, and it makes any test asserting an *empty*
+/// connector list nondeterministic.
+///
+/// Strips exactly that one injected directory out of the test process's
+/// `PATH`, once, so every test that calls this sees the `PATH` a real
+/// deployment would (never run from inside its own `target/debug`).
+/// Called from every `Config`-building test helper in this crate
+/// (`tests::test_config`, `scheduler::tests::test_config`) before it
+/// builds anything.
+#[cfg(test)]
+pub(crate) fn sanitize_test_path() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // <target>/debug/deps/dbs_web-<hash>.exe -> <target>/debug
+        let Some(own_output_dir) = std::env::current_exe().ok().and_then(|exe| {
+            exe.parent()
+                .and_then(std::path::Path::parent)
+                .map(std::path::Path::to_path_buf)
+        }) else {
+            return;
+        };
+        let Some(path_var) = std::env::var_os("PATH") else {
+            return;
+        };
+        let filtered: Vec<_> = std::env::split_paths(&path_var)
+            .filter(|dir| dir != &own_output_dir)
+            .collect();
+        let Ok(joined) = std::env::join_paths(filtered) else {
+            return;
+        };
+        // SAFETY: `ONCE` guarantees this body runs exactly once even
+        // under `cargo test`'s multi-threaded harness — the actual data
+        // mutated is `PATH`, and Windows' environment-block API
+        // (`SetEnvironmentVariableW`/`GetEnvironmentVariableW`, what
+        // `std::env` uses on this platform) is safe for concurrent
+        // access: a reader on another thread sees either the old or the
+        // new value, never a torn/corrupted one. A test thread that
+        // spawns a child process concurrently with this call therefore
+        // sees a well-defined (if unspecified-which) `PATH` snapshot,
+        // not memory unsafety — and no test in this crate depends on
+        // *which* snapshot a concurrently-spawned, unrelated child sees.
+        unsafe { std::env::set_var("PATH", joined) };
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +307,7 @@ mod tests {
     /// impl (every field is meaningful production config), so this is
     /// the one place in the crate that constructs one by hand.
     fn test_config() -> dbs_core::Config {
+        super::sanitize_test_path();
         dbs_core::Config {
             database: ":memory:".to_string(),
             export_dir: "exports".to_string(),
