@@ -8,6 +8,33 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Warn upfront when Research's "From my backups" has no YouTube source (closes #276)
+**2026-08-17**
+
+Selecting Videos = "From my backups" with zero YouTube-type sources
+configured gave no indication anything was wrong until after submitting -
+the job would start, then fail with "no videos to research from
+backed-up youtube sources; nothing to send to NotebookLM," a wasted
+round trip.
+
+`loadResearch`'s existing `youtube_sources` list (from `/api/research/meta`)
+now drives an inline warning and disables "Run research" the moment
+"From my backups" is selected with none configured - `#research-mode`'s
+change handler and the form's submit handler (defense in depth) both
+check the same `RESEARCH_META.youtube_sources.length`.
+
+Verified live: selecting "From my backups" against a fresh `dbs init`
+config (no sources at all) shows the warning and greys out "Run
+research"; switching back to "Search YouTube" clears both.
+
+### Fixed
+- None beyond the gap this closes.
+
+### Security
+- None.
+
+---
+
 ## Ten polish fixes from a full app walkthrough (closes #272, #273, #275, #277, #278, #279, #281, #282, #283, #284)
 **2026-08-17**
 

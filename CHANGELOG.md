@@ -71,6 +71,10 @@ yet, so everything so far is under Unreleased.
   defaults instead of requiring hand-written JSON in the Advanced textarea.
 
 ### Fixed
+- The Research page's "From my backups" mode now warns upfront (and
+  disables "Run research") when no YouTube-type source is configured,
+  instead of only failing after a wasted round trip through a job that
+  starts and then errors.
 - Several rounds of stale doc-comments describing already-landed wiring
   as still-open work, caught and corrected as later features shipped.
 - Dead/orphaned helper code removed once its real caller landed instead

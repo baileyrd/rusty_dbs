@@ -1589,14 +1589,27 @@ async function loadResearch() {
   sel.append(el("option", { value: "", textContent: "(all youtube sources)" }));
   m.youtube_sources.forEach((s) => sel.append(el("option", { value: s, textContent: s })));
   $("#research-questions").placeholder = m.default_questions.join("\n");
+  updateYoutubeWarning();
 }
 LOADERS.research = loadResearch;
 $("#refresh-research").addEventListener("click", loadResearch);
+
+// Warns upfront (closes #276) instead of only after a wasted round trip
+// through a job that fails with "no videos to research from backed-up
+// youtube sources" - `RESEARCH_META.youtube_sources` (set by
+// `loadResearch`) is empty exactly when that failure is guaranteed.
+function updateYoutubeWarning() {
+  const backup = $("#research-mode").value === "backup";
+  const noSources = backup && (!RESEARCH_META || RESEARCH_META.youtube_sources.length === 0);
+  $("#research-no-youtube-warning").classList.toggle("hidden", !noSources);
+  $("#research-run").disabled = noSources;
+}
 
 $("#research-mode").addEventListener("change", (e) => {
   const backup = e.target.value === "backup";
   $("#research-search-fields").classList.toggle("hidden", backup);
   $("#research-backup-fields").classList.toggle("hidden", !backup);
+  updateYoutubeWarning();
 });
 
 const lines = (v) => v.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -1606,6 +1619,10 @@ $("#research-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   if (researchES) { toast("A research run is already in progress.", "err"); return; }
   const mode = $("#research-mode").value;
+  if (mode === "backup" && (!RESEARCH_META || RESEARCH_META.youtube_sources.length === 0)) {
+    toast("No YouTube-type source is configured — nothing to research from.", "err");
+    return;
+  }
   const body = {
     mode,
     topic: $("#research-topic").value.trim(),
