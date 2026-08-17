@@ -18,6 +18,12 @@ default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
 # parallel = 1                   # back up N sources at once with --all (CLI
 #                                # --parallel overrides; browser-heavy
 #                                # connectors never overlap each other)
+# Each [sources.NAME] block below needs its 'type' connector's
+# dbs-connector-<type> binary to be discoverable: either on PATH, or under
+# connectors_dir (relative paths resolve against this file's directory).
+# Run `dbs connectors list -v` to see what's found and why anything failed
+# to load; the web UI's Connectors/API keys tabs read from the same list.
+# connectors_dir = "/path/to/dbs-connector-binaries"
 
 # --- Sources --------------------------------------------------------------
 # Each [sources.NAME] block configures one backup source. The 'type' selects a
