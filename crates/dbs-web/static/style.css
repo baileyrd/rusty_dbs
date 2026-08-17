@@ -401,6 +401,12 @@ nav#tabs { display: flex; flex-direction: column; gap: 4px; }
 
 /* ---------- Tables ---------- */
 .table-wrap { overflow-x: auto; }
+/* A min-width keeps every column at a sane, scannable size instead of
+   the browser's default table-layout:auto squeezing Title down to a
+   sliver at tablet widths (~850px) - past this width `.table-wrap`'s
+   overflow-x:auto now does what it was already meant to (closes #278).
+   `#history-table` has fewer/narrower columns and doesn't need this. */
+#browse-table { min-width: 720px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th {
   text-align: left;
@@ -418,7 +424,19 @@ tbody tr:last-child td { border-bottom: none; }
 tbody tr.rowlink { cursor: pointer; }
 tbody tr.rowlink:hover { background: var(--accent-soft); }
 tr.deleted td { opacity: 0.55; }
-td .title-cell { white-space: normal; max-width: 380px; display: block; line-height: 1.4; }
+/* Ellipsis-truncate instead of wrapping into many lines (closes #278) -
+   a click still opens the full item in the detail drawer (#284), so
+   nothing here is actually unreachable, just no longer forced into a
+   many-line-tall row that pushes the rest of the table's columns out
+   of a comfortable width. */
+td .title-cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 380px;
+  display: block;
+  line-height: 1.4;
+}
 .num { text-align: right; }
 th.num { text-align: right; }
 .pager { margin-top: 12px; }
@@ -729,6 +747,7 @@ details textarea { width: 100%; margin-top: 0.5rem; }
 .drawer-body { padding: 16px 18px; overflow-y: auto; font-size: 13px; line-height: 1.55; }
 .drawer-body a { color: var(--accent); word-break: break-all; }
 .drawer-body pre.log { font-size: 11.5px; }
+.item-body { white-space: pre-wrap; line-height: 1.6; margin: 10px 0; }
 .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; margin: 14px 0; }
 .kv dt {
   color: var(--text-3);

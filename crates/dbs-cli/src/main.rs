@@ -2638,6 +2638,10 @@ fn render_schedule(config_path: &Path, interval: &str, windows: bool) -> String 
 
 /// Mirrors the reference's `schedule` command.
 fn cmd_schedule(config_path: &Path, interval: &str) -> i32 {
+    if interval != "daily" && interval != "hourly" {
+        eprintln!("error: unrecognized --interval {interval:?}; expected \"daily\" or \"hourly\".");
+        return CONFIG_ERROR_EXIT_CODE;
+    }
     let absolute = std::path::absolute(config_path).unwrap_or_else(|_| config_path.to_path_buf());
     print!(
         "{}",
@@ -3092,7 +3096,16 @@ fn print_run(r: &RunResult) {
         human_duration(r.duration_ms()),
     );
     if let Some(err) = &r.error {
-        println!("      error: {err}");
+        if err == "dry-run" {
+            // Not a failure - the designed no-op of a `--dry-run` run
+            // correctly not persisting anything (closes #282). Every
+            // other skip reason (disabled source, VPN guard) still gets
+            // the `error:` label - those genuinely mean the run didn't
+            // happen when it otherwise would have.
+            println!("      note: dry-run (nothing written)");
+        } else {
+            println!("      error: {err}");
+        }
     }
     for w in &r.warnings {
         println!("      warning: {w}");

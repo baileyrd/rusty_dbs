@@ -265,6 +265,23 @@ fn write_config_document(
         .map_err(|e| DbsError::Storage(format!("failed to write config file: {e}")))
 }
 
+/// [`BackupService::vpn_doctor_check`]'s OS-specific "how to bring the
+/// VPN netns up" guidance (closes #281) — pure and `windows`-
+/// parameterized so both branches are unit-testable regardless of host
+/// OS, mirroring `dbs-cli`'s `render_schedule(.., windows: bool)`.
+/// Network namespaces (and `vpn-netns`/`sudo`) are a Linux concept —
+/// `vpn_exec`/`vpn_status`'s own default (`sudo vpn-netns exec`/
+/// `status`) won't run natively on Windows at all, so this doesn't
+/// suggest a Linux-only command there either.
+fn vpn_start_hint(windows: bool) -> &'static str {
+    if windows {
+        "network namespaces are Linux-only \u{2014} connect your VPN client natively, or run \
+         this from WSL/a Linux host if you rely on vpn-netns"
+    } else {
+        "start it (e.g. `sudo systemctl start vpn-netns`)"
+    }
+}
+
 /// What a [`ConnectorRunner`] reports back from actually running a
 /// connector's fetch — everything `BackupService` needs to call
 /// `Storage::finish_run` and build the returned [`RunResult`].
@@ -1601,11 +1618,12 @@ impl<'a> BackupService<'a> {
                 ),
             };
         }
+        let start_hint = vpn_start_hint(cfg!(target_os = "windows"));
         DoctorCheck {
             name: check_name,
             status: "warn".to_string(),
             detail: format!(
-                "requires VPN but the {ns:?} netns is not up \u{2014} start it (e.g. `sudo systemctl start vpn-netns`), then run via `{}`",
+                "requires VPN but the {ns:?} netns is not up \u{2014} {start_hint}, then run via `{}`",
                 self.config.vpn_exec
             ),
         }
@@ -4963,6 +4981,20 @@ mod tests {
         let vpn_check = checks.iter().find(|c| c.name == "source.a.vpn").unwrap();
         assert_eq!(vpn_check.status, "warn");
         assert!(vpn_check.detail.contains("not up"));
+    }
+
+    #[test]
+    fn vpn_start_hint_windows_avoids_linux_only_netns_tooling() {
+        let hint = vpn_start_hint(true);
+        assert!(!hint.contains("systemctl"), "{hint}");
+        assert!(!hint.contains("sudo"), "{hint}");
+        assert!(hint.contains("Linux-only"), "{hint}");
+    }
+
+    #[test]
+    fn vpn_start_hint_non_windows_suggests_systemctl() {
+        let hint = vpn_start_hint(false);
+        assert!(hint.contains("systemctl start vpn-netns"), "{hint}");
     }
 
     #[test]

@@ -8,6 +8,61 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Ten polish fixes from a full app walkthrough (closes #272, #273, #275, #277, #278, #279, #281, #282, #283, #284)
+**2026-08-17**
+
+A systematic pass through every page/command of a freshly-launched `dbs
+serve` and `dbs` CLI, filing and then fixing every gap found:
+
+- **#272/#273** - Add Source's Name/Advanced-options placeholders were
+  hardcoded to Raindrop's example regardless of the selected connector
+  Type. Both now derive from the real `config_schema` (#274) of whichever
+  type is selected.
+- **#275** - `GET /api/export`/`/api/items` silently accepted an inverted
+  `since`/`until` range and returned an empty result. Both now reject it
+  with a clear 400; the Export form also validates client-side before
+  navigating away, so the error shows as a toast instead of a raw JSON
+  error page.
+- **#277** - `dbs schedule --interval <typo>` silently fell back to the
+  daily preset instead of erroring. Now rejects anything but `daily`/
+  `hourly`.
+- **#278** - The Library Table view was unusable at tablet widths: Title
+  wrapped into 5+ lines per row and the MEDIA column was unreachable
+  (nothing overflowed for `.table-wrap`'s existing `overflow-x: auto` to
+  scroll). Title now ellipsis-truncates (a click still opens the full
+  item via #284's improved detail drawer) and the table has a `min-width`
+  so the browser stops squeezing columns instead of scrolling.
+- **#279** - "Back up all"/"Run" stayed clickable during the network
+  round-trip between a click and the server actually marking a run in
+  progress, so a fast double-click could slip a second request through
+  (rejected server-side, but not prevented client-side). Buttons now
+  disable synchronously on click.
+- **#281** - `dbs doctor`'s VPN-guard warning hardcoded Linux
+  (`sudo`/`systemctl`) guidance on every OS. Now OS-aware, matching `dbs
+  schedule`'s existing cron-vs-`schtasks` split.
+- **#282** - `dbs backup --dry-run`'s per-source result labeled its
+  intentional no-op `error: dry-run`. Now `note: dry-run (nothing
+  written)` - every other skip reason (disabled source, VPN guard) keeps
+  the `error:` label, since those genuinely mean the run didn't happen
+  when it otherwise would have.
+- **#283** - `document.title` never changed across tab navigation. Now
+  reflects the current section (e.g. `Library — Daily Backup System`),
+  reusing `switchTab`'s existing `TAB_TITLES` map.
+- **#284** - The item detail drawer showed only a raw JSON blob below a
+  small key/value table - a `description`-type field was only visible
+  as an escaped string buried inside it. The drawer now renders the
+  item's already-normalized `body` column (populated by the connector at
+  ingest time) as its own readable text block. Deliberately plain text,
+  not `innerHTML`: `body` is unsanitized external content, and rendering
+  it as live HTML would let a hostile feed run script in this page's
+  origin.
+
+### Security
+- None (the item-body render above was specifically kept as text
+  rendering to avoid introducing one).
+
+---
+
 ## Add source remove/enable/disable to the CLI and web UI (closes #280)
 **2026-08-17**
 

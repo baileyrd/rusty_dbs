@@ -120,9 +120,11 @@ function switchTab(tab) {
   $$(".nav-item").forEach((b) => b.classList.toggle("active",
     b.dataset.tab === navTab && (navTab !== "source" || b.dataset.source === SOURCE_PAGE.name)));
   $$(".tab").forEach((s) => s.classList.toggle("hidden", s.id !== "tab-" + tab));
-  $("#crumb").textContent = tab === "source"
+  const crumb = tab === "source"
     ? `Library / ${SOURCE_PAGE.name}`
     : (TAB_TITLES[tab] || tab);
+  $("#crumb").textContent = crumb;
+  document.title = tab === "dashboard" ? "Daily Backup System" : `${crumb} — Daily Backup System`;
   if (LOADERS[tab]) LOADERS[tab]();
 }
 $$(".nav-item").forEach((btn) => {
@@ -855,6 +857,16 @@ async function openItemDrawer(id) {
   if (item.url) {
     body.append(el("div", {}, el("a", { href: item.url, target: "_blank", rel: "noopener", textContent: item.url })));
   }
+  if (item.body) {
+    // Plain text, not innerHTML: `body` (`Storage::row_to_item`) comes
+    // straight from the external source (RSS/Reddit/etc.) with no
+    // sanitization, so rendering it as live HTML would let a hostile
+    // feed run script in this page's origin. Still a major readability
+    // win over the old "only visible inside the raw JSON blob" state
+    // (closes #284) - `white-space: pre-wrap` (.item-body) keeps its
+    // line breaks without interpreting embedded markup.
+    body.append(el("div", { className: "item-body", textContent: item.body }));
+  }
   if (item.media && item.media.length) {
     const mediaBox = el("div", { className: "media-list" });
     item.media.forEach((m) => {
@@ -1315,7 +1327,21 @@ async function loadAddForm() {
 LOADERS.add = loadAddForm;
 $("#add-type").addEventListener("change", (e) => renderTypeUI(e.target.value));
 
+function updatePlaceholders(type) {
+  $("#add-name").placeholder = type ? `${type}-personal` : "raindrop-personal";
+  const props = (CONNECTOR_SCHEMAS[type] || {}).properties || {};
+  const keys = Object.keys(props);
+  // Build a real example from this connector's actual schema (issue
+  // #274) instead of always showing raindrop's collection_id, which
+  // means nothing for e.g. github/udemy (closes #273).
+  const example = keys.length
+    ? Object.fromEntries(keys.slice(0, 2).map((k) => [k, props[k].default ?? ""]))
+    : {};
+  $("#add-options").placeholder = JSON.stringify(example);
+}
+
 function renderTypeUI(type) {
+  updatePlaceholders(type);
   renderSchemaFields(type);
   renderCaptureArea(type);
 }
@@ -1446,13 +1472,23 @@ $("#add-form").addEventListener("submit", async (e) => {
 
 $("#export-form").addEventListener("submit", (e) => {
   e.preventDefault();
+  const since = $("#export-since").value.trim();
+  const until = $("#export-until").value.trim();
+  // `type="date"` values are YYYY-MM-DD, so plain string comparison sorts
+  // correctly - catch an inverted range before navigating away (the
+  // server rejects it too, but that'd show as a raw error page instead
+  // of a toast, since this submit navigates via location.assign).
+  if (since && until && since > until) {
+    toast("Since is after Until — the date range is inverted.", "err");
+    return;
+  }
   const qs = new URLSearchParams();
   qs.set("format", $("#export-format").value);
   const csv = (id, key) => $(id).value.split(",").map((s) => s.trim()).filter(Boolean).forEach((v) => qs.append(key, v));
   csv("#export-source", "source");
   csv("#export-type", "type");
-  if ($("#export-since").value.trim()) qs.set("since", $("#export-since").value.trim());
-  if ($("#export-until").value.trim()) qs.set("until", $("#export-until").value.trim());
+  if (since) qs.set("since", since);
+  if (until) qs.set("until", until);
   if ($("#export-deleted").checked) qs.set("include_deleted", "true");
   if ($("#export-revisions").checked) qs.set("include_revisions", "true");
   if ($("#export-noraw").checked) qs.set("no_raw", "true");
@@ -1654,6 +1690,12 @@ let activeES = null;
 let activeJobId = null;
 let progressHadFailure = false;
 let progressWasStopped = false;
+// True from the moment `startBackup` fires until its POST resolves (or
+// fails) - `activeES` alone doesn't cover this window (it's only set once
+// `openProgress` opens the SSE stream), so a second click during the
+// network round-trip could otherwise slip through and only get rejected
+// server-side (closes #279).
+let backupStarting = false;
 
 function setBackupButtons(disabled) {
   // While a backup runs, lock the triggers. On finish, the source lists are
@@ -1663,11 +1705,18 @@ function setBackupButtons(disabled) {
 }
 
 async function startBackup(spec) {
-  if (activeES) { toast("A backup is already running.", "err"); return; }
+  if (activeES || backupStarting) { toast("A backup is already running.", "err"); return; }
+  backupStarting = true;
+  setBackupButtons(true);
   try {
     const job = await api("/api/backup", { method: "POST", body: JSON.stringify(spec) });
     openProgress(job);
-  } catch (e) { toast(e.message, "err"); }
+  } catch (e) {
+    setBackupButtons(false);
+    toast(e.message, "err");
+  } finally {
+    backupStarting = false;
+  }
 }
 
 function openProgress(job) {

@@ -358,6 +358,26 @@ fn parse_date_param(
         })
 }
 
+/// Rejects an inverted `since`/`until` range (closes #275) — shared by
+/// every `/api` route that accepts both (`items`, `export_download`):
+/// without this, an inverted range silently matches nothing and the
+/// caller gets a `200 OK` with an empty result instead of a clear
+/// error telling them their dates are backwards.
+fn validate_date_range(
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), ApiError> {
+    if let (Some(since), Some(until)) = (since, until) {
+        if since > until {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("since ({since}) is after until ({until}) — the date range is inverted"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `GET /api/items` — mirrors `dbs items`' (`cmd_items` in
 /// `dbs-cli/src/main.rs`) list branch: `source`/`type` (repeatable),
 /// `q` (search text), `since`/`until`, `include_deleted`, `limit`,
@@ -374,6 +394,7 @@ async fn items(
     let search = q.one("q");
     let since = parse_date_param(q.one("since"))?;
     let until = parse_date_param(q.one("until"))?;
+    validate_date_range(since, until)?;
     let include_deleted = q.one("include_deleted").as_deref() == Some("true");
     let limit: u32 = q.one("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
     let offset: u32 = q.one("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -1406,6 +1427,7 @@ async fn export_download(
     let item_types = q.all("type");
     let since = parse_date_param(q.one("since"))?;
     let until = parse_date_param(q.one("until"))?;
+    validate_date_range(since, until)?;
     let include_deleted = q.one("include_deleted").as_deref() == Some("true");
     let include_revisions = q.one("include_revisions").as_deref() == Some("true");
     let no_raw = q.one("no_raw").as_deref() == Some("true");
