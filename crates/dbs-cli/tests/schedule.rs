@@ -49,3 +49,19 @@ fn schedule_hourly_differs_from_the_default_daily_output() {
     assert_eq!(hourly.status.code(), Some(0), "{hourly:?}");
     assert_ne!(daily.stdout, hourly.stdout);
 }
+
+#[test]
+fn schedule_rejects_an_unrecognized_interval() {
+    let output = Command::new(dbs_bin())
+        .arg("--config")
+        .arg("dbs.toml")
+        .arg("schedule")
+        .arg("--interval")
+        .arg("bogus")
+        .output()
+        .unwrap();
+    assert_ne!(output.status.code(), Some(0), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("bogus"), "{stderr}");
+    assert!(String::from_utf8(output.stdout).unwrap().is_empty());
+}

@@ -105,5 +105,26 @@ yet, so everything so far is under Unreleased.
   longer depend on the host's ambient `PATH`/an unbuilt workspace, and
   Unix-only subprocess fixtures (`#!/bin/sh` scripts) are properly gated
   instead of failing outright.
+- Add Source's Name/Advanced-options placeholders now reflect the
+  selected connector Type instead of always showing Raindrop's example.
+- `/api/export`/`/api/items` reject an inverted `since`/`until` range
+  instead of silently returning an empty result.
+- `dbs schedule --interval <typo>` now errors instead of silently
+  falling back to the daily preset.
+- The Library Table view is usable at tablet widths again — Title
+  ellipsis-truncates instead of wrapping into 5+ lines per row, and the
+  table now scrolls horizontally to reach every column instead of being
+  squeezed unreadably narrow.
+- "Back up all"/"Run" now disable synchronously on click instead of
+  staying clickable through the network round-trip before the server
+  marks a run in progress.
+- `dbs doctor`'s VPN-guard warning is OS-aware instead of always
+  suggesting Linux-only `sudo`/`systemctl` commands.
+- `dbs backup --dry-run`'s result line no longer labels its intentional
+  no-op `error: dry-run`.
+- The web UI's `document.title` now reflects the current tab instead of
+  staying `Daily Backup System` everywhere.
+- The item detail drawer now renders a readable description block
+  instead of requiring the field be found inside the raw JSON dump.
 
 ### Security

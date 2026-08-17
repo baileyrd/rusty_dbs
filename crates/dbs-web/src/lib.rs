@@ -2068,6 +2068,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_export_rejects_an_inverted_since_until_range() {
+        let (status, body) = get_json(
+            router(None, test_opts()),
+            "/api/export?format=json&since=2026-08-20&until=2026-08-01",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("inverted"));
+    }
+
+    #[tokio::test]
+    async fn api_items_rejects_an_inverted_since_until_range() {
+        let (status, body) = get_json(
+            router(None, test_opts()),
+            "/api/items?since=2026-08-20&until=2026-08-01",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("inverted"));
+    }
+
+    #[tokio::test]
+    async fn api_items_accepts_an_equal_since_and_until() {
+        let (status, _body) = get_json(
+            router(None, test_opts()),
+            "/api/items?since=2026-08-01&until=2026-08-01",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn api_export_wiki_grouping_defaults_to_topic_and_accepts_item() {
         // format=wiki's response is a real zip file, not JSON -- check
         // status only, the same way api_export_downloads_a_json_file_
