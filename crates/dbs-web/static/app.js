@@ -113,6 +113,7 @@ const TAB_TITLES = {
 
 const LOADERS = {};
 function switchTab(tab) {
+  closeMobileSidebar();
   // "Add source" lives under Sources in the nav.
   const navTab = tab === "add" ? "sources" : tab;
   // Source sub-links all share data-tab="source" — match on the source name too.
@@ -124,6 +125,31 @@ function switchTab(tab) {
     : (TAB_TITLES[tab] || tab);
   if (LOADERS[tab]) LOADERS[tab]();
 }
+$$(".nav-item").forEach((btn) => {
+  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+});
+$$("[data-goto]").forEach((btn) => {
+  btn.addEventListener("click", () => switchTab(btn.dataset.goto));
+});
+
+// --- mobile sidebar (hidden by default under the `max-width: 760px`
+// breakpoint; `.open` on both `.sidebar` and `.sidebar-scrim` reveals it
+// as a slide-in drawer) ------------------------------------------------------
+
+function closeMobileSidebar() {
+  $("#menu-toggle").setAttribute("aria-expanded", "false");
+  document.querySelector(".sidebar").classList.remove("open");
+  $("#sidebar-scrim").classList.remove("open");
+}
+$("#menu-toggle").addEventListener("click", () => {
+  const sidebar = document.querySelector(".sidebar");
+  const open = !sidebar.classList.contains("open");
+  sidebar.classList.toggle("open", open);
+  $("#sidebar-scrim").classList.toggle("open", open);
+  $("#menu-toggle").setAttribute("aria-expanded", String(open));
+});
+$("#sidebar-scrim").addEventListener("click", closeMobileSidebar);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMobileSidebar(); });
 $$(".nav-item").forEach((btn) => {
   btn.addEventListener("click", () => switchTab(btn.dataset.tab));
 });

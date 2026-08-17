@@ -8,6 +8,31 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Restore navigation on mobile viewports (closes #263)
+**2026-08-17**
+
+`style.css`'s `@media (max-width: 760px)` block set `.sidebar { display:
+none; }` outright, with no JS anywhere in `app.js` to reveal it again — on
+any phone-width viewport, a user was stuck on whatever page loaded
+(Overview, the default route) with no way to reach Library, Sources,
+Connectors, API keys, Export, Research, or Verify. Everything else about
+the mobile layout already worked fine (stacked cards, readable activity
+feed, no overflow); this was the one missing piece.
+
+Added a hamburger `#menu-toggle` button in the topbar (hidden on desktop,
+shown only under the same breakpoint) that reveals the sidebar as a
+slide-in drawer with a dimmed scrim behind it — same `position: fixed` +
+`transform: translateX(...)` + `.open` idiom the existing item-detail
+`.drawer` already uses, not a new pattern. Closes on: a tap on the scrim,
+Escape, or navigating to any tab (wired into `switchTab()` itself, so
+every entry point — nav items, "Add a source →" links, source sub-pages —
+closes it automatically without each call site needing to know about it).
+Desktop (`>760px`) is untouched: the toggle button stays hidden and the
+sidebar remains the plain, always-visible column it always was.
+
+---
+
+
 ## Update README/ARCHITECTURE/CHANGELOG/ADRs to reflect current repo state
 **2026-08-15**
 
