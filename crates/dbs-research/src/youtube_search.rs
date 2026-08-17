@@ -234,8 +234,9 @@ pub fn rank_and_truncate(mut videos: Vec<VideoMeta>, count: usize) -> Vec<VideoM
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Write;
-
+    #[cfg(unix)]
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "dbs-research-ytsearch-test-{label}-{}-{:?}",
@@ -250,7 +251,11 @@ mod tests {
     /// (one video per line) to stdout — mirrors the fake-executable-
     /// on-PATH pattern used for `dbs update-ytdlp`'s tests, except
     /// here the fake's absolute path is passed directly rather than
-    /// resolved via `PATH`.
+    /// resolved via `PATH`. Relies on the OS honoring the `#!/bin/sh`
+    /// shebang to execute the script directly, a Unix-only kernel
+    /// feature — the production subprocess-launching code this
+    /// exercises is fully cross-platform.
+    #[cfg(unix)]
     fn fake_yt_dlp(dir: &std::path::Path, entries_ndjson: &str) -> std::path::PathBuf {
         let path = dir.join("fake-yt-dlp.sh");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -264,12 +269,14 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     fn video_json(id: &str, subs: i64, views: i64, upload_date: &str) -> String {
         format!(
             r#"{{"id": "{id}", "title": "Video {id}", "webpage_url": "https://youtu.be/{id}", "channel": "Chan", "channel_follower_count": {subs}, "view_count": {views}, "duration": 120, "upload_date": "{upload_date}"}}"#
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn search_videos_with_stats_using_parses_ndjson_and_dedups_across_queries() {
         let dir = temp_dir("dedup");

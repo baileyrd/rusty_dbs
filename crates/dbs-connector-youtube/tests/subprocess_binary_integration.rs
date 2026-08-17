@@ -20,13 +20,12 @@
 //! external integration test binary).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use dbs_core::{
-    run_connector_subprocess, ConnectorCandidate, ConnectorRegistry, Cursor, SqliteStorage,
-    Storage, WireRunContext,
-};
+#[cfg(unix)]
+use dbs_core::{run_connector_subprocess, Cursor, SqliteStorage, Storage, WireRunContext};
+use dbs_core::{ConnectorCandidate, ConnectorRegistry};
 
 fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_dbs-connector-youtube"))
@@ -65,7 +64,14 @@ fn the_real_binarys_handshake_is_valid_and_matches_the_connector() {
 /// default `YouTubeConfig` fetches: Watch Later (`list=WL`), Liked
 /// (`list=LL`), and playlist discovery (`feed/playlists`, answered
 /// empty so the run stays a full — not partial — enumeration).
-fn write_fake_yt_dlp(dir: &Path) -> PathBuf {
+//
+// Unix-only: the fake `yt-dlp` fixture below is a `#!/bin/sh` script.
+// Honoring a shebang to exec an interpreter is a Unix kernel `exec()`
+// feature Windows lacks, so this helper and the one test that uses it
+// are gated here; the `fetch()` subprocess-launching code under test
+// is itself fully cross-platform.
+#[cfg(unix)]
+fn write_fake_yt_dlp(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("fake-yt-dlp.sh");
     std::fs::write(
         &path,
@@ -97,6 +103,7 @@ exit 0
     path
 }
 
+#[cfg(unix)]
 #[test]
 fn a_real_run_against_a_fake_yt_dlp_commits_items_through_the_full_subprocess_boundary() {
     let dir = std::env::temp_dir().join(format!(
