@@ -1096,6 +1096,143 @@ mod tests {
         assert!(written.contains("type = \"fixture\""));
     }
 
+    // -- DELETE/PATCH /api/sources/:name (issue #280) --------------------
+
+    /// A real config file on disk with one `[sources.NAME]` block,
+    /// alongside a `Config` whose `sources` map and `source_path` both
+    /// point at it — the shape `remove_source`/`set_source_enabled`
+    /// require (they check `config.sources` in memory *and* rewrite the
+    /// file at `config.source_path`).
+    fn config_dir_with_a_source(
+        label: &str,
+        name: &str,
+        type_: &str,
+        enabled: bool,
+    ) -> dbs_core::Config {
+        let dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-sources-mutate-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("dbs.toml");
+        std::fs::write(
+            &config_path,
+            format!("[dbs]\n\n[sources.{name}]\ntype = \"{type_}\"\nenabled = {enabled}\n"),
+        )
+        .unwrap();
+        let mut config = test_config();
+        config.source_path = Some(config_path);
+        config.sources.insert(
+            name.to_string(),
+            dbs_core::SourceConfig {
+                name: name.to_string(),
+                type_: type_.to_string(),
+                enabled,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        config
+    }
+
+    async fn delete_json(router: Router, path: &str) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(path)
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let resp_body = body_string(response).await;
+        (
+            status,
+            serde_json::from_str(&resp_body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    async fn patch_json(
+        router: Router,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(path)
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let resp_body = body_string(response).await;
+        (
+            status,
+            serde_json::from_str(&resp_body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn api_delete_source_removes_it_from_the_config_file() {
+        let config = config_dir_with_a_source("remove", "a", "fixture", true);
+        let config_path = config.source_path.clone().unwrap();
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = delete_json(router(None, opts), "/api/sources/a").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "a");
+        let parsed = dbs_core::load_config(&config_path).unwrap();
+        assert!(!parsed.sources.contains_key("a"));
+    }
+
+    #[tokio::test]
+    async fn api_delete_source_on_an_unconfigured_name_reports_an_error() {
+        let (status, body) =
+            delete_json(router(None, test_opts()), "/api/sources/nonexistent").await;
+        assert!(!status.is_success());
+        assert!(body["detail"].as_str().unwrap().contains("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn api_update_source_flips_the_enabled_flag() {
+        let config = config_dir_with_a_source("flip", "a", "fixture", true);
+        let config_path = config.source_path.clone().unwrap();
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = patch_json(
+            router(None, opts),
+            "/api/sources/a",
+            serde_json::json!({"enabled": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "a");
+        assert_eq!(body["enabled"], false);
+        let parsed = dbs_core::load_config(&config_path).unwrap();
+        assert!(!parsed.sources["a"].enabled);
+    }
+
     // -- /api/secrets (issue #173) ---------------------------------------
 
     /// A temp directory to use as `Config::base_dir` — `test_config()`'s

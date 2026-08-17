@@ -291,6 +291,14 @@ function sourceRow(s, { compact = false } = {}) {
   if (s.requires_vpn) run.dataset.vpn = "1";
   run.addEventListener("click", () => startBackup({ source: s.name }));
   row.append(run);
+  if (!compact) {
+    const toggle = el("button", { className: "btn small", textContent: s.enabled ? "Disable" : "Enable" });
+    toggle.addEventListener("click", () => setSourceEnabled(s.name, !s.enabled));
+    row.append(toggle);
+    const remove = el("button", { className: "btn small err", textContent: "Remove" });
+    remove.addEventListener("click", () => removeSource(s.name));
+    row.append(remove);
+  }
   return row;
 }
 
@@ -472,6 +480,22 @@ async function loadSources() {
     a.addEventListener("click", (e) => { e.preventDefault(); switchTab("add"); });
     hint.append(a);
   }
+}
+
+async function setSourceEnabled(name, enabled) {
+  try {
+    await api(`/api/sources/${encodeURIComponent(name)}`, { method: "PATCH", body: JSON.stringify({ enabled }) });
+    toast(`${enabled ? "Enabled" : "Disabled"} ${name}.`, "ok");
+    loadSources();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function removeSource(name) {
+  try {
+    await api(`/api/sources/${encodeURIComponent(name)}`, { method: "DELETE" });
+    toast(`Removed ${name}.`, "ok");
+    loadSources();
+  } catch (e) { toast(e.message, "err"); }
 }
 LOADERS.sources = loadSources;
 $("#refresh-sources").addEventListener("click", loadSources);

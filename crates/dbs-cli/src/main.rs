@@ -391,6 +391,12 @@ enum SourcesCommand {
     },
     /// Check every configured source's connector loads and validates.
     Check,
+    /// Remove a source from the config.
+    Remove { name: String },
+    /// Enable a disabled source.
+    Enable { name: String },
+    /// Disable a source without removing it.
+    Disable { name: String },
 }
 
 #[derive(Subcommand)]
@@ -603,6 +609,9 @@ fn main() {
                 cmd_sources_add(&cli.config, name, type_, set)
             }
             SourcesCommand::Check => cmd_sources_check(&cli.config),
+            SourcesCommand::Remove { name } => cmd_sources_remove(&cli.config, name),
+            SourcesCommand::Enable { name } => cmd_sources_set_enabled(&cli.config, name, true),
+            SourcesCommand::Disable { name } => cmd_sources_set_enabled(&cli.config, name, false),
         },
         Command::Connectors(sub) => match sub {
             ConnectorsCommand::List { json_out, verbose } => {
@@ -2073,6 +2082,62 @@ fn cmd_sources_add(config_path: &Path, name: String, type_: String, set: Vec<Str
     match service.add_source(&name, &type_, &options, false, 0, false) {
         Ok(()) => {
             println!("Added source {name:?} ({type_}).");
+            0
+        }
+        Err(e) => report_config_error(&e),
+    }
+}
+
+/// Mirrors the CLI's `sources remove` (issue #280).
+fn cmd_sources_remove(config_path: &Path, name: String) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = build_registry(&cfg);
+    let runner = SubprocessRunner::new(&cfg);
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    match service.remove_source(&name) {
+        Ok(()) => {
+            println!("Removed source {name:?}.");
+            0
+        }
+        Err(e) => report_config_error(&e),
+    }
+}
+
+/// Mirrors the CLI's `sources enable`/`sources disable` (issue #280).
+fn cmd_sources_set_enabled(config_path: &Path, name: String, enabled: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = build_registry(&cfg);
+    let runner = SubprocessRunner::new(&cfg);
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    match service.set_source_enabled(&name, enabled) {
+        Ok(()) => {
+            if enabled {
+                println!("Enabled source {name:?}.");
+            } else {
+                println!("Disabled source {name:?}.");
+            }
             0
         }
         Err(e) => report_config_error(&e),

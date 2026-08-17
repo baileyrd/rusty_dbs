@@ -8,6 +8,35 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Add source remove/enable/disable to the CLI and web UI (closes #280)
+**2026-08-17**
+
+`dbs sources` only had `list`/`add`/`check`, and the web UI's Sources page
+only offered a per-row "Run" button - there was no supported way to remove
+a mistakenly-added source or temporarily stop backing one up without
+hand-editing `dbs.toml` directly (delete the `[sources.NAME]` block, or add
+`enabled = false` by hand). Not a reference gap (the pinned
+baileyrd/Daily-Backup-System commit never had this either) - a genuinely
+new capability.
+
+Added `BackupService::remove_source`/`::set_source_enabled` (`dbs-core`),
+format-preserving via `toml_edit` so removing or toggling one source never
+disturbs any other source's comments or layout in the file. Wired through:
+- CLI: `dbs sources remove NAME`, `dbs sources enable NAME`,
+  `dbs sources disable NAME`.
+- Web: `DELETE /api/sources/:name`, `PATCH /api/sources/:name` (body
+  `{"enabled": bool}`), plus new Disable/Enable and Remove buttons on each
+  source's row on the Sources tab (Overview's compact rows are untouched -
+  no destructive actions on the dashboard summary).
+
+### Fixed
+- None beyond the gap this closes.
+
+### Security
+- None.
+
+---
+
 ## Author real `config_schema` for every connector that reads options (closes #274)
 **2026-08-17**
 
