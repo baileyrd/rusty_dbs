@@ -748,6 +748,11 @@ mod tests {
         path
     }
 
+    // Unix-only: the fake yt-dlp scripts below rely on `#!/bin/sh` shebang
+    // execution, a Unix kernel `exec()` feature Windows lacks. The
+    // production subprocess-launching code this exercises is fully
+    // cross-platform.
+    #[cfg(unix)]
     /// A fake `yt-dlp` that branches on a URL substring in its own
     /// arguments (mirroring the fake-executable-on-disk pattern
     /// `dbs-research`'s YouTube search and `dbs-connector-vimeo`
@@ -826,6 +831,8 @@ exit 0"#,
         assert!(matches!(result[0], Err(ConnectorError::Config(_))));
     }
 
+    // Unix-only: relies on the `#!/bin/sh` fake yt-dlp script above.
+    #[cfg(unix)]
     #[test]
     fn full_fetch_yields_videos_from_watch_later_and_liked_and_a_reconcile_marker() {
         let dir = temp_dir("full-fetch");
@@ -857,6 +864,8 @@ exit 0"#,
         assert!(marker.live_ids.contains("watch-later:v1") && marker.live_ids.contains("liked:v2"));
     }
 
+    // Unix-only: relies on the `#!/bin/sh` fake yt-dlp script above.
+    #[cfg(unix)]
     #[test]
     fn history_is_off_by_default_and_included_when_enabled() {
         let dir = temp_dir("history-off");
@@ -888,6 +897,8 @@ exit 0"#,
             .any(|e| matches!(e, FetchEvent::Item(i) if i.external_id() == "watch-history:v3")));
     }
 
+    // Unix-only: relies on `#!/bin/sh` shebang execution of a fake yt-dlp script.
+    #[cfg(unix)]
     #[test]
     fn a_failed_list_withholds_the_reconcile_marker_but_keeps_the_other_list() {
         let dir = temp_dir("failed-list");
@@ -947,6 +958,8 @@ exit 0"#,
             .any(|e| matches!(e, FetchEvent::ReconcileMarker(_))));
     }
 
+    // Unix-only: relies on the `#!/bin/sh` fake yt-dlp script above.
+    #[cfg(unix)]
     #[test]
     fn playlist_discovery_finds_and_dumps_each_playlist() {
         let dir = temp_dir("discovery-ok");
@@ -977,6 +990,8 @@ exit 0"#,
             .any(|e| matches!(e, FetchEvent::ReconcileMarker(_))));
     }
 
+    // Unix-only: relies on `#!/bin/sh` shebang execution of a fake yt-dlp script.
+    #[cfg(unix)]
     #[test]
     fn a_duplicate_video_within_one_list_keeps_only_the_first_occurrence() {
         let dir = temp_dir("dedup");

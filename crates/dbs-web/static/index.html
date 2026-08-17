@@ -73,10 +73,14 @@
 
     <div class="sidebar-foot" id="meta"></div>
   </aside>
+  <div class="sidebar-scrim" id="sidebar-scrim"></div>
 
   <!-- ================= Main ================= -->
   <div class="main">
     <div class="topbar">
+      <button class="btn ghost menu-toggle" id="menu-toggle" title="Toggle navigation" aria-label="Toggle navigation" aria-expanded="false">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4.5h12M2 8h12M2 11.5h12"/></svg>
+      </button>
       <span class="crumb" id="crumb">Overview</span>
       <span class="health-chip hidden" id="health-chip"><span class="dot ok" id="health-dot"></span><span id="health-text"></span></span>
       <span class="spacer"></span>
@@ -362,7 +366,7 @@
           downloading a bundle — for a downstream tool that watches a folder for new files. Incremental by
           default: only items created or updated since the last successful run are (re-)written.</p>
         <form id="notes-export-form" class="card pad form">
-          <label>Output directory <input id="notes-export-dir" required placeholder="/path/to/watched/folder" /></label>
+          <label>Output directory <input id="notes-export-dir" required placeholder="e.g. /path/to/watched/folder (server host path; C:\watched\folder on Windows)" /></label>
           <label>Source(s) <input id="notes-export-source" placeholder="comma,separated (optional)" /></label>
           <label>Type(s) <input id="notes-export-type" placeholder="comma,separated (optional)" /></label>
           <label>Since <input id="notes-export-since" type="date" /></label>

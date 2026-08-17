@@ -28,6 +28,139 @@ entry counts as 0, a `store_media`-fetched one counts as 1.
 
 ---
 
+## Restore navigation on mobile viewports (closes #263)
+**2026-08-17**
+
+`style.css`'s `@media (max-width: 760px)` block set `.sidebar { display:
+none; }` outright, with no JS anywhere in `app.js` to reveal it again — on
+any phone-width viewport, a user was stuck on whatever page loaded
+(Overview, the default route) with no way to reach Library, Sources,
+Connectors, API keys, Export, Research, or Verify. Everything else about
+the mobile layout already worked fine (stacked cards, readable activity
+feed, no overflow); this was the one missing piece.
+
+Added a hamburger `#menu-toggle` button in the topbar (hidden on desktop,
+shown only under the same breakpoint) that reveals the sidebar as a
+slide-in drawer with a dimmed scrim behind it — same `position: fixed` +
+`transform: translateX(...)` + `.open` idiom the existing item-detail
+`.drawer` already uses, not a new pattern. Closes on: a tap on the scrim,
+Escape, or navigating to any tab (wired into `switchTab()` itself, so
+every entry point — nav items, "Add a source →" links, source sub-pages —
+closes it automatically without each call site needing to know about it).
+Desktop (`>760px`) is untouched: the toggle button stays hidden and the
+sidebar remains the plain, always-visible column it always was.
+
+---
+
+## Fix Windows path display and connector-discovery onboarding UX
+**2026-08-17**
+
+Found while driving a live `dbs serve` instance end to end (a browser-driven
+walkthrough of every tab, dark/light theme, exports, and a real backup run):
+
+1. **Raw Windows verbatim path leaked into the UI.** `load_config`'s
+   `path.canonicalize()` returns a `\\?\`-prefixed extended-length path on
+   Windows; that value flowed straight into `/api/meta`'s `config_path` and
+   `/api/secrets`' `env_file`, so the sidebar footer and API-keys page showed
+   `\\?\C:\dev\...\dbs.toml` on every screen instead of a normal path.
+   Added `dbs_core::config::display_path()` (strips the prefix; a no-op on
+   any other path/OS) and used it at both display sites — the canonicalized
+   path itself is unchanged for actual file I/O, only the string shown to
+   the user is affected.
+2. **Connectors page had no empty state.** With zero connectors discoverable
+   (the default for a fresh `dbs init` — nothing on `PATH`, no
+   `connectors_dir` configured), the page silently rendered nothing instead
+   of an explanatory message, unlike every other page in the app. Added one.
+3. **API keys page contradicted a failed backup.** With connectors
+   undiscoverable, `/api/secrets` couldn't resolve a configured source's
+   type to its declared secret keys, so the page confidently said "None of
+   your configured sources require an API key" — directly contradicting a
+   backup that had just failed on a missing secret for that exact source.
+   `/api/secrets` now reports `unresolved_source_types` (configured types
+   with no matching discovered connector); the UI shows a distinct warning
+   instead of the misleading "none required" message when any exist.
+4. Generated `dbs.toml` now documents `connectors_dir`/`PATH` discovery and
+   `dbs connectors list -v` right where a fresh `dbs init` leaves it, and
+   the Notes-export "Output directory" field's placeholder is
+   platform-neutral instead of POSIX-only.
+
+---
+
+## Resolve connector secrets from `.env`, not just the process environment (closes #262)
+**2026-08-17**
+
+`SubprocessRunner::run_connector` resolved a connector's declared
+`secret_keys` purely via `std::env::var(key)` — the real OS process
+environment — with no reference to `.env` at all. Every other secret
+consumer in the codebase (`BackupService::doctor`,
+`crypto::resolve_passphrase`, `BackupService::restore`) correctly
+threads a `secret_store` map parsed from `.env`; this one call site was
+never wired the same way. Result: the entire documented setup flow was
+broken — `dbs init`'s own printed instructions, the generated
+`dbs.toml`'s `token_env` comments, ADR-0001's stated design ("secrets
+... live in `.env`"), and the web UI's whole "API keys" page all assume
+a `.env` value reaches the connector, and none of them did. `dbs
+doctor` made it worse by correctly reading `.env` and reporting a
+secret "set" right before the same backup failed with "required secret
+is not set in the environment."
+
+Fixed by reading `.env` (via `parse_env_file(&self.config
+.env_file_path())`) fresh on every `run_connector` call, preferring it
+over the process environment when both are set — the same precedence
+`resolve_passphrase` already guarantees. Reads it fresh rather than
+caching: `dbs serve` doesn't restart when the web UI's "API keys" page
+writes a new value, so the very next run must see it. 2 new
+integration tests in `dbs-core/tests/run_stream_integration.rs`,
+exercising the real subprocess boundary end to end via
+`test_connector_fixture`: a secret arriving purely from `.env`, and
+`.env` winning over a conflicting process-env value.
+
+---
+
+## Make the test suite deterministic on Windows
+**2026-08-16**
+
+Running `cargo test`/`cargo clippy -- -D warnings` on a Windows dev
+machine after a full `cargo build --workspace` surfaced 13 failing test
+targets, none pre-existing on Linux CI and none caused by unrelated
+edits (confirmed via `git stash` isolation and a controlled experiment
+moving connector binaries out of `target/debug`). Two root causes, both
+platform-specific:
+
+1. **Cargo/Windows PATH injection**: `cargo test` prepends the crate's
+   own `target/debug` to the *test process's* `PATH` for DLL resolution;
+   after `cargo build --workspace` that directory holds every real
+   `dbs-connector-*.exe` this repo ships. Any test assuming "PATH has no
+   connectors" (or using a real type like `raindrop` as a stand-in for
+   "unregistered") silently broke. Fixed in `dbs-web` with a
+   `sanitize_test_path()` `Once`-guarded helper that strips exactly the
+   injected directory from the test process's own `PATH`; fixed in
+   `dbs-cli`'s integration tests by scoping the *spawned child's* `PATH`
+   via `Command::env("PATH", ...)` in each file's shared `run()` helper
+   (no `unsafe`, no global mutation), plus one type-name swap where no
+   shared helper existed. Along the way, found and fixed a real latent
+   bug this exposed: `connectors_dir_with_raindrop()` (a test fixture)
+   copied the connector binary without Windows' `.exe` suffix, so
+   `connectors_dir`-based discovery was silently broken on Windows the
+   whole time, masked only by the same PATH pollution.
+2. **Unix-only shebang test fixtures**: several tests write a `#!/bin/sh`
+   script (or hardcode `/bin/sh` as an interpreter) and execute it
+   directly — a Unix kernel `exec()` feature Windows lacks. Gated
+   `#[cfg(unix)]` on the confirmed-failing tests and their
+   exclusively-used helpers across `dbs-connector-support`, `-reddit`,
+   `-skool`, `-udemy`, `-vimeo`, `-youtube` (lib + integration test), and
+   `dbs-research`, matching the convention already established in
+   `dbs-web`. Also fixed one pre-existing instance of the same gap in
+   `dbs-core::registry` (`scan_temp_dir`, flagged only by
+   `clippy -D warnings`).
+
+No production behavior changed; only test fixtures and cfg-gating.
+`cargo build`, `cargo test`, `cargo clippy --all-targets --all-features
+-- -D warnings`, and `cargo fmt --all -- --check` — the four commands
+README documents — are all green on Windows.
+
+---
+
 
 ## Update README/ARCHITECTURE/CHANGELOG/ADRs to reflect current repo state
 **2026-08-15**

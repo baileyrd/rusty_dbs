@@ -35,6 +35,25 @@ fn write_config(dir: &std::path::Path, sources_block: &str) -> PathBuf {
     config_path
 }
 
+/// On Windows, `cargo test` prepends this test binary's own
+/// build-output directory (`target/debug` — exactly `dbs_bin()`'s
+/// parent, since `CARGO_BIN_EXE_dbs` points straight at it) to *this
+/// test process's* `PATH`, for DLL resolution. After `cargo build
+/// --workspace`, that same directory holds every real
+/// `dbs-connector-*` binary this repo ships, so the spawned `dbs`
+/// child below would inherit and genuinely discover them via
+/// `PATH`-based connector search unless this strips that one entry —
+/// this file's whole premise is that an enabled source always
+/// surfaces "connector unavailable" (no discovery configured).
+fn sanitized_path() -> std::ffi::OsString {
+    let own_dir = dbs_bin().parent().map(std::path::Path::to_path_buf);
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(
+        std::env::split_paths(&path_var).filter(|p| Some(p.as_path()) != own_dir.as_deref()),
+    )
+    .unwrap_or(path_var)
+}
+
 fn run(
     dir: &std::path::Path,
     config_path: &std::path::Path,
@@ -42,6 +61,7 @@ fn run(
 ) -> std::process::Output {
     Command::new(dbs_bin())
         .current_dir(dir)
+        .env("PATH", sanitized_path())
         .arg("--config")
         .arg(config_path)
         .args(args)
