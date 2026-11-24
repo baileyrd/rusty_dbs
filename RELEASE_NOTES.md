@@ -8,6 +8,37 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Clip core: url2obs's extractor in Rust (Mill Board #1306)
+**2026-11-24**
+
+New crate `dbs-clip`, the clip core of the knowledge pipeline (Mill
+Board #763): `clip(html, &SourceMeta) -> Result<Clipped, ClipError>`
+turns a page into Obsidian-style markdown with YAML frontmatter. It is
+pure (no I/O, no clock: the clip date is an input) and deterministic.
+
+It ports url2obs's `MetadataExtractor`, `HtmlCleaner`, `ContentScorer`
+and `ContentFormatter` (baileyrd/url2obs@9d47b33) onto `scraper`, and
+adds a hand-written HTML-to-markdown walk (headings, paragraphs, links,
+lists, code, blockquotes, emphasis, images, simple tables).
+Frontmatter keeps url2obs's keys and adds `raindrop_id`, `saved`,
+`highlights`, `fetch_path` and `content_hash` (SHA-256 of the body).
+
+A few changes from url2obs, each fixing a wrong pick on a real page,
+are listed in the crate docs: Readability-style votes for text blocks
+without `<p>` (arXiv abstracts, old `<font>`/`<br>` pages), a penalty
+for boilerplate class names, code recognised by class not id (gist
+comments), quoted YAML.
+
+No new third-party code: every dependency was already in `Cargo.lock`.
+
+### Fixed
+- None.
+
+### Security
+- None. No network or file access in the crate.
+
+---
+
 ## Warn upfront when Research's "From my backups" has no YouTube source (closes #276)
 **2026-08-17**
 

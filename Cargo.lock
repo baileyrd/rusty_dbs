@@ -517,6 +517,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-clip"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ego-tree",
+ "scraper",
+ "sha2",
+ "url",
+]
+
+[[package]]
 name = "dbs-connector-bluesky"
 version = "0.1.0"
 dependencies = [
