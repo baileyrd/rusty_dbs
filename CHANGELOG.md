@@ -11,6 +11,8 @@ yet, so everything so far is under Unreleased.
 ## [Unreleased]
 
 ### Added
+- **Clip core** (`dbs-clip`, #1306): pure HTML-to-markdown clipper with
+  Obsidian frontmatter, ported from url2obs, for the knowledge pipeline.
 - **Core engine** (`dbs-core`): data model, error hierarchy, `Connector`
   contract/capabilities, cursor/checkpoint-safe engine with idempotent
   upsert + content-hash change classification, revision history,
