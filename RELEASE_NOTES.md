@@ -8,6 +8,44 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Knowledge pipeline batch runner: Raindrop source, fetch chain, ledger (Mill Board #1308)
+**2026-11-24**
+
+New crate `dbs-pipeline` (library + `dbs-pipeline` binary), the first
+running stage of the knowledge pipeline (Mill Board #763). It lists
+Raindrop bookmarks (`--newest N` or `--ids`), fetches each page, clips it
+with `dbs-clip` and writes `<out>/<raindrop id>.md`.
+
+- **Source port + Raindrop adapter**: id, link, title, tags, save date,
+  highlights, newest first, through dbs-core's `ManagedHttpClient` (retry,
+  `Retry-After`, 120 requests/minute). Items are validated at the
+  boundary; a bad link is reported, not fatal.
+- **Fetch chain**: the live page (redirects followed, so share.google
+  links resolve), then Raindrop's stored copy (DBS's
+  `archive_permanent_copy`: the `/cache` redirect is read by hand so the
+  token never reaches the storage host), then the Wayback Machine
+  (availability API, then the raw `id_` snapshot). The result names the
+  path that worked or carries every failure. PDFs are recorded, not
+  clipped.
+- **Ledger**: append-only JSONL, one synced line per settled id (done,
+  failed, skipped). Done and skipped ids are never refetched; failed ones
+  are retried. A torn last line after a crash is skipped and reported.
+  Dedupe by normalised URL (scheme, `www.`, fragment, `utm_*` and similar
+  ignored) and by body hash.
+- **Runner**: `--dry-run`, bounded `--concurrency`, Ctrl-C stops taking
+  items and lets in-flight ones finish so the ledger stays consistent.
+
+The Raindrop token comes from `RAINDROP_TOKEN` (or `--token-env`) and is
+never logged or written.
+
+### Fixed
+- None.
+
+### Security
+- The Raindrop bearer token is sent only to the Raindrop API host.
+
+---
+
 ## Clip core: url2obs's extractor in Rust (Mill Board #1306)
 **2026-11-24**
 

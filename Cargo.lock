@@ -725,6 +725,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-pipeline"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ctrlc",
+ "dbs-clip",
+ "dbs-core",
+ "mockito",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "dbs-research"
 version = "0.1.0"
 dependencies = [
