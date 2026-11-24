@@ -11,6 +11,8 @@ yet, so everything so far is under Unreleased.
 ## [Unreleased]
 
 ### Added
+- **Knowledge pipeline runner** (`dbs-pipeline`, #1308): Raindrop source,
+  live/Raindrop-copy/Wayback fetch chain, resumable JSONL ledger.
 - **Clip core** (`dbs-clip`, #1306): pure HTML-to-markdown clipper with
   Obsidian frontmatter, ported from url2obs, for the knowledge pipeline.
 - **Core engine** (`dbs-core`): data model, error hierarchy, `Connector`

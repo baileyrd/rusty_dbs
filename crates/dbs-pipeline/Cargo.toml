@@ -1,0 +1,26 @@
+[package]
+name = "dbs-pipeline"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Knowledge pipeline batch runner: Raindrop bookmarks -> fetch (live, Raindrop cache, Wayback) -> clip -> markdown files, with a resumable append-only ledger."
+
+[[bin]]
+name = "dbs-pipeline"
+path = "src/main.rs"
+
+# All already in Cargo.lock (dbs-core, dbs-cli and dbs-connector-raindrop
+# use the same versions): no new third-party code.
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+ctrlc = "3"
+dbs-clip = { path = "../dbs-clip" }
+dbs-core = { path = "../dbs-core" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+
+[dev-dependencies]
+mockito = "1"
