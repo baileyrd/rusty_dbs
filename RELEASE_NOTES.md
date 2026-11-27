@@ -8,6 +8,35 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Drop install hints for the Python package this port replaced
+**2026-11-27**
+
+The `dbs init` config template and the Research page's fallback hint
+still told users to `pip install 'daily-backup-system[<extra>]'` (and
+`pip install -e ".[skool]"`). That is the Python reference package's own
+install command, and that package does not exist in this Rust port, so
+anyone who followed it hit a dead end. The hints now name what is actually
+needed. Reddit and Skool still drive a browser through Python and
+Playwright, and YouTube and Skool still need yt-dlp, so those `pip`
+steps stay. Each hint first points to the Connectors page's Install button
+(`dbs serve --allow-setup`), which runs those steps for you.
+
+The Research page's no-setup fallback now builds its `pip install`
+command from `/api/research/meta`'s `pip_requirements`, so it can't drift
+from the real requirements again.
+
+Comments that describe how the Python reference behaved were left alone;
+they document parity decisions and are still accurate.
+
+### Fixed
+- Stale `daily-backup-system[...]` install instructions in
+  `config.toml.template` and `app.js`.
+
+### Security
+- None.
+
+---
+
 ## Warn upfront when Research's "From my backups" has no YouTube source (closes #276)
 **2026-08-17**
 

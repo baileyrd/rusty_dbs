@@ -71,6 +71,11 @@ yet, so everything so far is under Unreleased.
   defaults instead of requiring hand-written JSON in the Advanced textarea.
 
 ### Fixed
+- The `dbs init` config template and the Research page no longer tell
+  users to `pip install 'daily-backup-system[...]'`, which is the Python
+  reference package's install command and not part of this port. They now
+  name the real dependencies (Playwright, yt-dlp, nodejs-wheel) and point
+  to the Connectors page's Install button.
 - The Research page's "From my backups" mode now warns upfront (and
   disables "Run research") when no YouTube-type source is configured,
   instead of only failing after a wasted round trip through a job that

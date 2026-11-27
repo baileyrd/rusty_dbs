@@ -1549,7 +1549,7 @@ async function loadResearch() {
       });
       setup.append(btn);
     } else {
-      setup.append(el("code", { textContent: "pip install 'daily-backup-system[research]'" }));
+      setup.append(el("code", { textContent: `pip install ${m.pip_requirements.join(" ")}` }));
     }
   }
 
