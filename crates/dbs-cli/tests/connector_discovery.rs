@@ -16,24 +16,30 @@ fn dbs_bin() -> PathBuf {
 }
 
 /// `CARGO_BIN_EXE_<name>` is only set for the current *package's own*
-/// binary targets, not a dev-dependency's — so this locates the real,
-/// already-compiled `dbs-connector-raindrop` binary the way Cargo
-/// itself lays workspace binaries out: as a sibling of this very test
-/// binary, two directories up (`target/<profile>/deps/<test> ->
-/// target/<profile>/`). Building it in the first place only happens
-/// because `dbs-connector-raindrop` is a dev-dependency of this crate
-/// (see `Cargo.toml`) — Cargo compiles a path dependency's binary
-/// targets even though it doesn't expose their `CARGO_BIN_EXE_*` vars.
+/// binary targets, not a dev-dependency's — so this finds the real,
+/// already-compiled `dbs-connector-raindrop` binary in the profile
+/// directory (`target/<profile>/`) by walking up from this test binary.
+///
+/// Walking up rather than assuming "two directories up" matters:
+/// older Cargo runs tests from `target/<profile>/deps/`, but newer Cargo
+/// runs them from a separate build dir such as
+/// `target/<profile>/build/<pkg>/<hash>/out/`, while finished binaries
+/// still land in `target/<profile>/`. CI builds the workspace first so
+/// the connector is there; a local `cargo build --workspace` does too.
 fn raindrop_connector_bin() -> PathBuf {
+    let name = format!("dbs-connector-raindrop{}", std::env::consts::EXE_SUFFIX);
     let test_exe = std::env::current_exe().unwrap();
-    let profile_dir = test_exe
-        .parent()
-        .and_then(|deps| deps.parent())
-        .expect("test exe is under target/<profile>/deps/");
-    profile_dir.join(format!(
-        "dbs-connector-raindrop{}",
-        std::env::consts::EXE_SUFFIX
-    ))
+    test_exe
+        .ancestors()
+        .skip(1)
+        .map(|dir| dir.join(&name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "no {name} found above {} — run `cargo build --workspace` first",
+                test_exe.display()
+            )
+        })
 }
 
 fn temp_dir(label: &str) -> PathBuf {
