@@ -1629,7 +1629,11 @@ function showAddDone(sc) {
     box.append(el("p", { className: "muted", textContent: "Ready to go. Run its first backup now, or let the schedule pick it up." }));
   }
   const run = el("button", { className: "btn" + (needsLogin ? "" : " primary"), textContent: "Back up now" });
-  run.addEventListener("click", () => { startBackup({ source: sc.name }); switchTab("dashboard"); });
+  // Only leave this panel once the backup actually started; on a refusal
+  // the error stays visible here instead of vanishing behind a page switch.
+  run.addEventListener("click", async () => {
+    if (await startBackup({ source: sc.name })) switchTab("dashboard");
+  });
   const another = el("button", { className: "btn ghost", textContent: "Add another" });
   another.addEventListener("click", showServicePicker);
   const view = el("button", { className: "btn ghost", textContent: "View sources" });
@@ -1892,16 +1896,20 @@ function setBackupButtons(disabled) {
   if (disabled) $$(".run-btn").forEach((b) => { b.disabled = true; });
 }
 
+// Resolves true once the job has started, false if it was refused (the
+// error is already toasted), so callers can stay put on failure.
 async function startBackup(spec) {
-  if (activeES || backupStarting) { toast("A backup is already running.", "err"); return; }
+  if (activeES || backupStarting) { toast("A backup is already running.", "err"); return false; }
   backupStarting = true;
   setBackupButtons(true);
   try {
     const job = await api("/api/backup", { method: "POST", body: JSON.stringify(spec) });
     openProgress(job);
+    return true;
   } catch (e) {
     setBackupButtons(false);
     toast(e.message, "err");
+    return false;
   } finally {
     backupStarting = false;
   }

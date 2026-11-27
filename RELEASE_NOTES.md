@@ -8,6 +8,55 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Web UI source edits take effect without restarting `dbs serve`
+**2026-11-27**
+
+`dbs serve` loaded `dbs.toml` once at startup and gave every handler the
+same frozen copy. The web UI also *edits* that file: adding, removing,
+enabling or disabling a source wrote it correctly, but the running server
+kept serving its startup copy. A newly added source didn't appear on
+Overview or Sources, and **Back up now** was refused with
+`no such source`, until the process restarted. The streamlined
+Add-source flow made this the first thing a new user hits. It was also
+true of the remove/enable/disable buttons added in #287.
+
+The new `ConfigHandle` (`dbs-web/src/config_handle.rs`) keeps the same
+snapshot model: each request takes one `Arc<Config>` and uses it
+throughout, so no request sees a half-applied change. The three
+source-editing endpoints then call `reload()` once their write succeeds.
+A reload that fails (say, the file was hand-edited into invalid TOML in
+the meantime) keeps the previous snapshot and reports
+"saved to the config file, but reloading it failed", because the write
+itself did succeed. The scheduler reads a fresh snapshot on each tick,
+so sources added in the UI also get scheduled. `start_backup` now uses
+one snapshot for both its "is this a configured source" check and the
+job.
+
+The done panel's **Back up now** used to switch to Overview even when the
+backup was refused, which hid the error. It now stays put and shows the
+error unless the job actually started.
+
+Verified in headless Edge against a running scratch server: add Raindrop,
+and Overview immediately shows `1 / 1` and lists it, as does Sources.
+Over HTTP, a backup of a newly added source is accepted and runs.
+
+### Fixed
+- Sources added, removed, enabled or disabled in the web UI only took
+  effect after restarting `dbs serve`.
+- **Back up now** hid the backup's refusal by switching pages.
+
+### Added
+- `ConfigHandle`, with 5 unit tests: reload, snapshot isolation, a broken
+  file keeps the previous config, clones share state, and no-op without
+  a file. Also 2 cross-platform HTTP tests (delete, then disable, each
+  followed by a read-back on the same router) and a Unix one (create,
+  list, back up). Verified to fail with the reload disabled.
+
+### Security
+- None.
+
+---
+
 ## Streamline the web UI's setup flow into one Add-source screen
 **2026-11-27**
 

@@ -142,6 +142,7 @@ async fn meta(State(state): State<AppState>) -> Json<Value> {
         "core_api_version": CURRENT_API_VERSION,
         "config_path": state
             .config
+            .current()
             .source_path
             .as_deref()
             .map(dbs_core::display_path)
@@ -161,7 +162,7 @@ async fn status(
     State(state): State<AppState>,
     Query(params): Query<SourceParam>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -176,7 +177,7 @@ async fn status(
 }
 
 async fn metrics(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -205,7 +206,7 @@ async fn history(
     State(state): State<AppState>,
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -227,7 +228,7 @@ async fn history(
 /// joined to it; both are "fail-closed, disable Run" per the
 /// frontend's own comment), and a human `detail` string.
 async fn vpn(State(state): State<AppState>) -> Json<Value> {
-    let config = &state.config;
+    let config = state.config.current();
     let relevant = config.sources.values().any(|s| s.enabled && s.requires_vpn);
     if !relevant {
         return Json(json!({"relevant": false, "up": null, "detail": ""}));
@@ -268,7 +269,7 @@ async fn verify(
     State(state): State<AppState>,
     Query(params): Query<SourceParam>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -399,7 +400,7 @@ async fn items(
     let limit: u32 = q.one("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
     let offset: u32 = q.one("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -430,7 +431,7 @@ async fn item_detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Option<ItemRow>, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -479,7 +480,7 @@ fn mime_from_blob_row(row: &ItemRow) -> String {
 /// how `app.js` uses it directly as an `<img src>`/download `<a href>`
 /// (`openItemDrawer`'s media list).
 async fn media(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Response, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Option<ItemRow>, DbsError> {
         let storage = open_storage(&config)?;
         storage.get_media_blob(id)
@@ -523,7 +524,7 @@ enum ThumbOutcome {
 /// proxying bytes this server never stored (YouTube connector items
 /// have no image media rows at all — `app.js`'s own comment on this).
 async fn thumb(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Response, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let outcome = tokio::task::spawn_blocking(move || -> Result<ThumbOutcome, DbsError> {
         let mut storage = open_storage(&config)?;
         let item = {
@@ -593,7 +594,7 @@ async fn thumb(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Res
 /// so the `Vec<ConnectorInfo>` is returned as-is rather than wrapped in
 /// an envelope.
 async fn connectors(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -643,7 +644,7 @@ fn annotate_install_requirements(row: &mut Value, registry: &dbs_core::Connector
 /// `enabled`/`schedule`/`backed_up` per `BackupService::list_sources`.
 /// `app.js`'s `loadSourceDetail` fetches this as a flat array too.
 async fn sources(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -683,7 +684,7 @@ async fn create_source(
     State(state): State<AppState>,
     Json(body): Json<CreateSourceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name = body.name.clone();
     let type_ = body.type_.clone();
     tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
@@ -702,7 +703,22 @@ async fn create_source(
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    reload_config(&state)?;
     Ok(Json(json!({"name": name, "type": type_})))
+}
+
+/// Makes a just-written `dbs.toml` the config every later request sees.
+/// Without this the edit only took effect after `dbs serve` restarted:
+/// a new source didn't appear and couldn't be backed up. The write itself
+/// already succeeded by the time this runs, so a failure here says so
+/// rather than implying nothing was saved.
+fn reload_config(state: &AppState) -> Result<(), ApiError> {
+    state.config.reload().map_err(|e| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("saved to the config file, but reloading it failed: {e}"),
+        )
+    })
 }
 
 /// `DELETE /api/sources/:name` — bridges `BackupService::remove_source`,
@@ -712,7 +728,7 @@ async fn delete_source(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name_for_task = name.clone();
     tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
         let mut storage = open_storage(&config)?;
@@ -723,6 +739,7 @@ async fn delete_source(
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    reload_config(&state)?;
     Ok(Json(json!({"name": name})))
 }
 
@@ -741,7 +758,7 @@ async fn update_source(
     Path(name): Path<String>,
     Json(body): Json<UpdateSourceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name_for_task = name.clone();
     let enabled = body.enabled;
     tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
@@ -753,6 +770,7 @@ async fn update_source(
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    reload_config(&state)?;
     Ok(Json(json!({"name": name, "enabled": enabled})))
 }
 
@@ -807,7 +825,7 @@ fn allowed_secret_keys(
 /// this field lets `loadSecrets` tell the two apart instead of quietly
 /// claiming no key is required.
 async fn secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let (allowed, keys_by_type) = allowed_secret_keys(&config)?;
 
@@ -895,7 +913,7 @@ async fn set_secret(
     State(state): State<AppState>,
     Json(body): Json<SetSecretRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name = body.name.clone();
     tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
         let (allowed, _keys_by_type) = allowed_secret_keys(&config)?;
@@ -929,7 +947,7 @@ async fn delete_secret(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name_for_task = name.clone();
     let removed = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
         crate::envfile::unset_var(&config.env_file_path(), &name_for_task)
@@ -1031,6 +1049,7 @@ async fn start_backup(
     State(state): State<AppState>,
     Json(body): Json<StartBackupRequest>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
+    let config = state.config.current();
     if !body.all {
         match &body.source {
             None => {
@@ -1039,7 +1058,7 @@ async fn start_backup(
                     "either \"source\" or \"all\" must be given".to_string(),
                 ))
             }
-            Some(name) if !state.config.sources.contains_key(name) => {
+            Some(name) if !config.sources.contains_key(name) => {
                 return Err(ApiError(
                     StatusCode::BAD_REQUEST,
                     format!("no such source: {name:?}"),
@@ -1049,7 +1068,6 @@ async fn start_backup(
         }
     }
 
-    let config = state.config.clone();
     let spec = serde_json::to_value(&body).unwrap_or(Value::Null);
     let all = body.all;
     let source = body.source;
@@ -1162,7 +1180,7 @@ async fn install_connector(
     Path(type_): Path<String>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
     require_setup_enabled(&state)?;
-    let config = state.config.clone();
+    let config = state.config.current();
     let type_for_job = type_.clone();
     let result = state
         .job_manager
@@ -1195,7 +1213,7 @@ async fn start_capture_job(
     target: String,
 ) -> Result<Json<JobSnapshot>, ApiError> {
     require_setup_enabled(state)?;
-    let config = state.config.clone();
+    let config = state.config.current();
     let target_for_job = target.clone();
     let result =
         state
@@ -1291,7 +1309,7 @@ async fn import_capture(
         )
     })?;
 
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -1384,7 +1402,7 @@ async fn import_source(
 /// and which fields its config overrode. Mirrors the reference's
 /// `GET /api/export/profiles` (`src/dbs/web/app.py`).
 async fn export_profiles(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -1494,7 +1512,7 @@ async fn export_download(
     };
     let ext_for_job = ext.clone();
 
-    let config = state.config.clone();
+    let config = state.config.current();
     let data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -1572,7 +1590,7 @@ async fn export_notes_route(
     Json(body): Json<ExportNotesRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let since = parse_date_param(body.since)?;
-    let config = state.config.clone();
+    let config = state.config.current();
     let out_dir = PathBuf::from(&body.out_dir);
     let sources = body.source;
     let item_types = body.item_type;
@@ -1663,9 +1681,9 @@ async fn research_meta(State(state): State<AppState>) -> Json<Value> {
     } else {
         pip_requirements.clone()
     };
-    let configured = resolve_auth_state(&state.config.base_dir).is_some();
-    let mut youtube_sources: Vec<&String> = state
-        .config
+    let config = state.config.current();
+    let configured = resolve_auth_state(&config.base_dir).is_some();
+    let mut youtube_sources: Vec<&String> = config
         .sources
         .iter()
         .filter(|(_, sc)| sc.type_ == "youtube")
@@ -1806,7 +1824,7 @@ async fn start_research(
         ));
     }
     let backup_mode = body.mode == "backup";
-    let config = state.config.clone();
+    let config = state.config.current();
     let spec = json!({
         "mode": if backup_mode { "backup" } else { "search" },
         "topic": topic,

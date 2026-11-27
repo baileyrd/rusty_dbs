@@ -79,6 +79,10 @@ yet, so everything so far is under Unreleased.
   defaults instead of requiring hand-written JSON in the Advanced textarea.
 
 ### Fixed
+- Sources added, removed, enabled or disabled in the web UI now take
+  effect immediately. Previously the server kept serving the config it
+  started with, so a new source didn't appear and **Back up now** was
+  refused with "no such source" until `dbs serve` restarted.
 - The web UI's Install button appeared on every connector, including ones
   with nothing to install, because it read a `ready` field the API never
   sent. `/api/connectors` now reports `needs_install` and
