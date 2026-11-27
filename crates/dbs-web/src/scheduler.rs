@@ -26,6 +26,7 @@ use dbs_core::service::{BackupAllOptions, BackupService};
 use dbs_core::{build_registry, CancelToken, Config, DbsError, SubprocessRunner};
 
 use crate::api::{open_storage, CancelBridge, JobProgressSink};
+use crate::config_handle::ConfigHandle;
 use crate::jobs::{JobAlreadyRunning, JobManager};
 
 /// How often the loop checks for due sources — a plain "check every
@@ -40,11 +41,13 @@ pub(crate) const TICK_INTERVAL: Duration = Duration::from_secs(60);
 /// no separate shutdown signal is needed for a single-process local
 /// tool like this, unlike the reference's ASGI lifespan hook (which
 /// has to explicitly join a non-daemon-adjacent OS thread).
-pub(crate) fn spawn(config: Arc<Config>, job_manager: Arc<JobManager>, interval: Duration) {
+pub(crate) fn spawn(config: ConfigHandle, job_manager: Arc<JobManager>, interval: Duration) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            tick(&config, &job_manager).await;
+            // A fresh snapshot each tick, so sources added or changed
+            // in the UI are scheduled without a restart.
+            tick(&config.current(), &job_manager).await;
         }
     });
 }
@@ -245,7 +248,11 @@ mod tests {
         let config = Arc::new(config);
         let job_manager = Arc::new(JobManager::new());
 
-        spawn(config, job_manager.clone(), Duration::from_millis(20));
+        spawn(
+            ConfigHandle::new((*config).clone()),
+            job_manager.clone(),
+            Duration::from_millis(20),
+        );
 
         for _ in 0..200 {
             if job_manager.current().is_some() {

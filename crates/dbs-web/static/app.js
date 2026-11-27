@@ -120,6 +120,7 @@ function switchTab(tab) {
   $$(".nav-item").forEach((b) => b.classList.toggle("active",
     b.dataset.tab === navTab && (navTab !== "source" || b.dataset.source === SOURCE_PAGE.name)));
   $$(".tab").forEach((s) => s.classList.toggle("hidden", s.id !== "tab-" + tab));
+  if ($(`#nav-advanced [data-tab="${navTab}"]`)) $("#nav-advanced").open = true;
   const crumb = tab === "source"
     ? `Library / ${SOURCE_PAGE.name}`
     : (TAB_TITLES[tab] || tab);
@@ -304,6 +305,17 @@ function sourceRow(s, { compact = false } = {}) {
   return row;
 }
 
+// Shown wherever the source list is empty: the first thing a new user
+// needs is a source, so make that one obvious button.
+function emptySourcesCTA() {
+  const btn = el("button", { className: "btn primary", textContent: "+ Add your first source" });
+  btn.addEventListener("click", () => switchTab("add"));
+  return el("div", { className: "empty-cta" },
+    el("strong", { textContent: "Nothing is being backed up yet." }),
+    el("span", { className: "muted", textContent: "Pick a service, paste its key or sign in, and you're done." }),
+    btn);
+}
+
 function feedItem(r) {
   const what = el("div", { className: "what" });
   what.append(el("strong", { textContent: r.source_name || "?" }));
@@ -417,12 +429,7 @@ async function loadDashboard() {
   list.innerHTML = "";
   $("#dash-sources-aux").textContent = rows.length ? `${rows.length} configured` : "";
   if (!rows.length) {
-    const empty = el("div", { className: "empty-row" });
-    empty.append(document.createTextNode("No sources configured yet. "));
-    const a = el("a", { href: "#", textContent: "Add a source →" });
-    a.addEventListener("click", (e) => { e.preventDefault(); switchTab("add"); });
-    empty.append(a);
-    list.append(empty);
+    list.append(emptySourcesCTA());
   } else {
     rows.forEach((s) => list.append(sourceRow(s, { compact: true })));
   }
@@ -459,12 +466,7 @@ async function loadSources() {
 
   list.innerHTML = "";
   if (!rows.length) {
-    const empty = el("div", { className: "empty-row" });
-    empty.append(document.createTextNode("No sources configured yet. "));
-    const a = el("a", { href: "#", textContent: "Add a source →" });
-    a.addEventListener("click", (e) => { e.preventDefault(); switchTab("add"); });
-    empty.append(a);
-    list.append(empty);
+    list.append(emptySourcesCTA());
   } else {
     rows.forEach((s) => list.append(sourceRow(s)));
   }
@@ -1063,23 +1065,20 @@ async function loadConnectors() {
         if (v === true) caps.append(el("span", { className: "pill", textContent: k.replace(/^supports_/, "") }));
       });
 
-      const ready = el("span", { className: "pill " + (c.ready ? "st-success" : "st-partial"),
-        textContent: c.ready ? "ready" : "needs setup" });
+      const ready = el("span", { className: "pill " + (c.needs_install ? "st-partial" : "st-success"),
+        textContent: c.needs_install ? "needs Python packages" : "nothing to install" });
 
       const actions = el("div", { className: "conn-actions" });
       const addBtn = el("button", { className: "btn small", textContent: "Add source" });
       addBtn.addEventListener("click", () => startAddSource(c.type));
       actions.append(addBtn);
-      if (!c.ready) {
+      if (c.needs_install) {
         if (META.setup_enabled) {
-          const install = el("button", { className: "btn primary small", textContent: "Install" });
+          const install = el("button", { className: "btn small", textContent: "Install" });
           install.addEventListener("click", () => installConnector(c.type, install));
           actions.append(install);
-        } else if (c.ready_detail) {
-          actions.append(el("code", { textContent: c.ready_detail }));
-        }
-        if (c.needs_playwright_browser && !META.setup_enabled) {
-          actions.append(el("span", { className: "tag", textContent: "+ playwright install chromium" }));
+        } else {
+          actions.append(el("span", { className: "tag", textContent: "needs: " + c.install_requirements.join(", ") }));
         }
       }
       // per_source captures need a configured source -> use the Sources-row
@@ -1090,11 +1089,6 @@ async function loadConnectors() {
         cap.addEventListener("click", () => captureConnector(c.type, cap));
         actions.append(cap);
         actions.append(importControl(`/api/connectors/${encodeURIComponent(c.type)}/import`));
-      }
-      if (c.secret_keys.length) {
-        const jump = el("a", { href: "#", textContent: "set API key →" });
-        jump.addEventListener("click", (e) => { e.preventDefault(); switchTab("secrets"); });
-        actions.append(jump);
       }
       if (c.docs_url) actions.append(el("a", { href: c.docs_url, target: "_blank", rel: "noopener", textContent: "docs ↗" }));
 
@@ -1208,11 +1202,33 @@ function streamSetup(jobId, title) {
     if (setupES) { setupES.close(); setupES = null; }
     const snap = JSON.parse(m.data);
     const ok = snap.status === "done";
-    toast(ok ? "Setup finished." : `Setup failed: ${snap.error || "error"}`, ok ? "ok" : "err");
+    // An install from the Connectors page doesn't create a source; say so,
+    // since "Done" alone reads like setup is finished.
+    const fromConnectors = !$("#tab-connectors").classList.contains("hidden") && title.startsWith("Installing");
+    const doneMsg = fromConnectors ? "Installed. Next: add a source that uses it." : "Setup finished.";
+    toast(ok ? doneMsg : `Setup failed: ${snap.error || "error"}`, ok ? "ok" : "err");
     loadConnectors();
     loadSecrets();
+    refreshAddFormAfterSetup();
   });
   setupES.onerror = () => { /* 'end' handles teardown */ };
+}
+
+// An install or login just finished: if the Add-source form is open,
+// re-read that connector so "needs install" / "saved" reflect reality,
+// keeping whatever the user already typed.
+async function refreshAddFormAfterSetup() {
+  if ($("#tab-add").classList.contains("hidden") || $("#add-form").classList.contains("hidden")) return;
+  const type = $("#add-type").value;
+  try {
+    const [items, secrets] = await Promise.all([api("/api/connectors"), api("/api/secrets")]);
+    items.forEach((c) => { CONNECTORS[c.type] = c; });
+    SAVED_SECRETS = new Set(secrets.saved || []);
+  } catch (e) { toast(e.message, "err"); return; }
+  const c = CONNECTORS[type];
+  if (!c) return;
+  renderInstallArea(c);
+  renderCaptureArea(c);
 }
 
 // --- secrets / API keys ----------------------------------------------------
@@ -1300,131 +1316,246 @@ $("#secret-other-form").addEventListener("submit", (e) => {
 });
 
 // --- add source ------------------------------------------------------------
+//
+// One guided flow for everything a new source needs, so setup never means
+// visiting Connectors, API keys and Sources separately:
+//   1. pick a service from a grid (no internal type codes);
+//   2. one form: install deps if missing, paste the API key (saved to .env),
+//      log in if the service needs it, then the required options — the
+//      rest folds under "More options";
+//   3. a done panel with the obvious next step (log in, or back up now).
 
 let CONNECTOR_SCHEMAS = {};
-let CONNECTORS = {};         // full connector objects by type
-let pendingAddType = null;  // a connector type to preselect on next form load
+let CONNECTORS = {};           // full connector objects by type
+let SAVED_SECRETS = new Set(); // secret keys that already have a value
+let EXISTING_SOURCES = [];     // configured sources: [{name, type}]
+let pendingAddType = null;     // a connector type to preselect on next load
 
 async function loadAddForm() {
-  const sel = $("#add-type");
   try {
-    const items = await api("/api/connectors");
+    const [items, secrets, status] = await Promise.all([
+      api("/api/connectors"), api("/api/secrets"), api("/api/status"),
+    ]);
     CONNECTOR_SCHEMAS = {};
     CONNECTORS = {};
-    sel.innerHTML = "";
     items.forEach((c) => {
       CONNECTOR_SCHEMAS[c.type] = c.config_schema || {};
       CONNECTORS[c.type] = c;
-      sel.append(el("option", { value: c.type, textContent: `${c.type} — ${c.display_name}` }));
     });
-    if (pendingAddType && CONNECTOR_SCHEMAS[pendingAddType]) {
-      sel.value = pendingAddType;
-    }
-    pendingAddType = null;
-    renderTypeUI(sel.value);
-  } catch (e) { toast(e.message, "err"); }
+    SAVED_SECRETS = new Set(secrets.saved || []);
+    EXISTING_SOURCES = status.map((s) => ({ name: s.name, type: s.type }));
+  } catch (e) { toast(e.message, "err"); return; }
+  const type = pendingAddType;
+  pendingAddType = null;
+  if (type && CONNECTORS[type]) pickService(type);
+  else showServicePicker();
 }
 LOADERS.add = loadAddForm;
-$("#add-type").addEventListener("change", (e) => renderTypeUI(e.target.value));
 
-function updatePlaceholders(type) {
-  $("#add-name").placeholder = type ? `${type}-personal` : "raindrop-personal";
-  const props = (CONNECTOR_SCHEMAS[type] || {}).properties || {};
-  const keys = Object.keys(props);
-  // Build a real example from this connector's actual schema (issue
-  // #274) instead of always showing raindrop's collection_id, which
-  // means nothing for e.g. github/udemy (closes #273).
-  const example = keys.length
-    ? Object.fromEntries(keys.slice(0, 2).map((k) => [k, props[k].default ?? ""]))
-    : {};
-  $("#add-options").placeholder = JSON.stringify(example);
+function showAddStep(step) {
+  $("#add-pick").classList.toggle("hidden", step !== "pick");
+  $("#add-form").classList.toggle("hidden", step !== "form");
+  $("#add-done").classList.toggle("hidden", step !== "done");
 }
 
-function renderTypeUI(type) {
-  updatePlaceholders(type);
-  renderSchemaFields(type);
-  renderCaptureArea(type);
-}
-
-// Per-connector setup guidance + a "Log in (capture session)" action, right
-// where you configure the source.
-function renderCaptureArea(type) {
-  const box = $("#add-capture");
-  box.innerHTML = "";
-  const c = CONNECTORS[type];
-  if (!c) return;
-  if (c.setup_hint) box.append(el("div", { className: "hint", textContent: c.setup_hint }));
-  if (!c.auth_capture) return;
-  const ac = c.auth_capture;
-  const wrap = el("div", { className: "capture-box" });
-  if (ac.per_source) {
-    // The capture target depends on this source's config, so it runs after the
-    // source is added — from the Sources tab.
-    wrap.append(el("div", { className: "muted",
-      textContent: `Add the source (with its folder configured), then use the “${ac.label}” button on the Sources tab to capture the login.` }));
-    box.append(wrap);
+function showServicePicker() {
+  showAddStep("pick");
+  $("#add-desc").textContent = "Choose what to back up";
+  const grid = $("#add-pick");
+  grid.innerHTML = "";
+  const all = Object.values(CONNECTORS).sort((a, b) => a.display_name.localeCompare(b.display_name));
+  if (!all.length) {
+    grid.append(el("div", { className: "muted hint-line", textContent:
+      "No connectors found. Build them with `cargo build --workspace`, or point dbs.toml's [dbs] connectors_dir at the folder that holds the dbs-connector-* programs." }));
     return;
   }
-  wrap.append(el("div", { className: "muted",
-    textContent: `This source needs a login. Capture it once — a browser opens on this machine, you log in, and ${ac.secret_key} is saved to your .env.` }));
-  if (META.setup_enabled) {
-    const btn = el("button", { type: "button", className: "btn primary small", textContent: `${ac.label} (open browser)` });
-    btn.addEventListener("click", () => captureConnector(type, btn));
-    wrap.append(btn);
-    wrap.append(importControl(`/api/connectors/${encodeURIComponent(type)}/import`));
-    wrap.append(el("div", { className: "hint",
-      textContent: "No display on this server? Run `dbs capture " + type + "` on your desktop instead, then Import the file it produces." }));
-    if (c.capture_ready === false) {
-      wrap.append(el("div", { className: "tag", textContent: "First run installs Playwright + a browser, then opens the login window (watch the log)." }));
+  all.forEach((c) => {
+    const card = el("button", { type: "button", className: "service-card" },
+      el("span", { className: "service-name", textContent: c.display_name }),
+      el("span", { className: "service-blurb", textContent: c.description || "" }));
+    if (EXISTING_SOURCES.some((s) => s.type === c.type)) {
+      card.append(el("span", { className: "pill st-success", textContent: "added" }));
     }
+    card.addEventListener("click", () => pickService(c.type));
+    grid.append(card);
+  });
+}
+
+function defaultSourceName(type) {
+  const taken = new Set(EXISTING_SOURCES.map((s) => s.name));
+  if (!taken.has(type)) return type;
+  for (let i = 2; ; i++) if (!taken.has(`${type}-${i}`)) return `${type}-${i}`;
+}
+
+function pickService(type) {
+  const c = CONNECTORS[type];
+  showAddStep("form");
+  $("#add-desc").textContent = "Fill in what it needs, then add it";
+  $("#add-type").value = type;
+  $("#add-title").textContent = c.display_name;
+  $("#add-blurb").textContent = c.description || "";
+  $("#add-name").value = defaultSourceName(type);
+  $("#add-result").textContent = "";
+  $("#add-options").value = "";
+  $("#add-more").open = false;
+  renderInstallArea(c);
+  renderSecretFields(c);
+  renderCaptureArea(c);
+  renderSchemaFields(type);
+}
+$("#add-change").addEventListener("click", showServicePicker);
+
+// Jump to Add source with a connector already chosen.
+function startAddSource(type) {
+  pendingAddType = type;
+  switchTab("add");  // triggers loadAddForm(), which honors pendingAddType
+}
+
+// Missing dependencies: offer Install right here instead of on Connectors.
+function renderInstallArea(c) {
+  const box = $("#add-install");
+  box.innerHTML = "";
+  if (!c.needs_install) return;
+  // The server knows what a connector needs, not whether it's already
+  // installed, so say so rather than claim it's missing.
+  const wrap = el("div", { className: "notice" },
+    el("strong", { textContent: `${c.display_name} needs a one-time install` }),
+    el("div", { className: "muted", textContent:
+      `Python packages: ${c.install_requirements.map(pkgName).join(", ")}. Already installed them before? Skip this.` }));
+  if (META.setup_enabled) {
+    const btn = el("button", { type: "button", className: "btn small", textContent: "Install" });
+    btn.addEventListener("click", () => installConnector(c.type, btn));
+    wrap.append(btn);
   } else {
-    wrap.append(el("div", { className: "tag st-partial",
-      textContent: "Login capture is disabled — restart the server with:  dbs serve --allow-setup" }));
+    wrap.append(el("div", { className: "tag",
+      textContent: "Installing from the browser is off. Restart with  dbs serve --allow-setup  to enable it." }));
   }
   box.append(wrap);
 }
 
-// Jump to the Add-source view with a connector type preselected.
-function startAddSource(type) {
-  pendingAddType = type;
-  switchTab("add");  // triggers loadAddForm(), which honors pendingAddType
-  $("#add-name").focus();
+// One field per secret the connector declares. The handshake doesn't say
+// which keys are optional, so infer it from the connector's shape:
+//  * a login-capture connector's other keys are extras (e.g. Skool's
+//    cookies for embedded YouTube videos) -> folded under More options;
+//  * a key named *_FILE / *_DIR is a path, not something to paste;
+//  * a connector with a single typed key needs it (Raindrop, Pinboard...).
+// The key the login capture fills in is handled by the capture area.
+function renderSecretFields(c) {
+  const box = $("#add-secrets");
+  const extras = $("#add-secrets-optional");
+  box.innerHTML = "";
+  extras.innerHTML = "";
+  const captured = c.auth_capture && c.auth_capture.secret_key;
+  const keys = c.secret_keys.filter((k) => k !== captured);
+  const optional = Boolean(captured);
+  keys.forEach((key) => {
+    const saved = SAVED_SECRETS.has(key);
+    const isPath = /_(FILE|DIR)$/.test(key);
+    const input = el("input", {
+      type: isPath ? "text" : "password", autocomplete: "new-password",
+      placeholder: saved ? "Already saved — leave blank to keep it" : (isPath ? "Full path" : "Paste your key"),
+      dataset: { secret: key },
+    });
+    if (!saved && !optional && keys.length === 1) input.required = true;
+    const name = keys.length === 1 && !isPath && !optional ? "API key" : humanize(key);
+    const label = el("label", {},
+      el("span", { className: "label-row" },
+        document.createTextNode(name + (optional ? " (optional)" : "")),
+        saved ? el("span", { className: "pill st-success", textContent: "saved" }) : document.createTextNode("")),
+      input,
+      el("span", { className: "tag", textContent: `Saved to .env as ${key}, never in the config file.` }));
+    if (c.docs_url && !isPath) {
+      label.append(el("a", { href: c.docs_url, target: "_blank", rel: "noopener", className: "tag", textContent: "Where do I get this? ↗" }));
+    }
+    (optional ? extras : box).append(label);
+  });
 }
 
-function renderSchemaFields(type) {
-  const box = $("#add-schema");
+// Login-based services. Connector-wide logins can be captured right away;
+// per-source ones need the source to exist first, so the done panel
+// offers that button instead.
+function renderCaptureArea(c) {
+  const box = $("#add-capture");
   box.innerHTML = "";
+  if (c.setup_hint) box.append(el("div", { className: "hint", textContent: c.setup_hint }));
+  if (!c.auth_capture) return;
+  const ac = c.auth_capture;
+  const saved = SAVED_SECRETS.has(ac.secret_key);
+  const wrap = el("div", { className: "capture-box" });
+  if (ac.per_source) {
+    wrap.append(el("div", { className: "muted", textContent:
+      `This service needs you to log in. After you add the source, a “${ac.label}” button opens a browser so you can sign in once.` }));
+    box.append(wrap);
+    return;
+  }
+  wrap.append(el("div", { className: "muted", textContent: saved
+    ? "Login already captured. Capture again only if backups start failing with an auth error."
+    : "This service needs you to log in once: a browser opens on this machine, you sign in, and the session is saved." }));
+  if (META.setup_enabled) {
+    const btn = el("button", { type: "button", className: "btn small" + (saved ? "" : " primary"), textContent: `${ac.label} (opens a browser)` });
+    btn.addEventListener("click", () => captureConnector(c.type, btn));
+    wrap.append(btn);
+    wrap.append(importControl(`/api/connectors/${encodeURIComponent(c.type)}/import`));
+    wrap.append(el("div", { className: "hint",
+      textContent: "No screen on this server? Run `dbs capture " + c.type + "` on your desktop, then Import the file it produces." }));
+  } else {
+    wrap.append(el("div", { className: "tag st-partial",
+      textContent: "Login capture is off. Restart the server with  dbs serve --allow-setup" }));
+  }
+  box.append(wrap);
+}
+
+// "yt-dlp[default]>=2026.1" -> "yt-dlp": the name is what a person needs.
+const pkgName = (req) => req.replace(/[\[<>=!~;].*$/, "").trim();
+
+// "collection_id" -> "Collection id"; "RAINDROP_TOKEN" -> "Raindrop token".
+function humanize(key) {
+  const s = key.replace(/_/g, " ").toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Required options up front; everything optional (with defaults) folds
+// under "More options" so the first screen stays short.
+function renderSchemaFields(type) {
+  const req = $("#add-schema");
+  const opt = $("#add-schema-optional");
+  req.innerHTML = "";
+  opt.innerHTML = "";
   const schema = CONNECTOR_SCHEMAS[type] || {};
   const props = schema.properties || {};
   const required = new Set(schema.required || []);
   Object.entries(props).forEach(([key, spec]) => {
-    const type0 = Array.isArray(spec.type) ? spec.type[0] : spec.type;
-    const labelTxt = `${key}${required.has(key) ? " *" : ""}`;
-    let input;
-    if (type0 === "boolean") {
-      input = el("input", { type: "checkbox", dataset: { key, kind: "boolean" } });
+    const box = required.has(key) ? req : opt;
+    const kind = Array.isArray(spec.type) ? spec.type[0] : spec.type;
+    const labelTxt = humanize(key) + (required.has(key) ? " *" : "");
+    const help = spec.description ? el("span", { className: "tag", textContent: spec.description }) : document.createTextNode("");
+    if (kind === "boolean") {
+      const input = el("input", { type: "checkbox", dataset: { key, kind: "boolean" } });
       if (spec.default === true) input.checked = true;
-      const lab = el("label", { className: "check" }, input, document.createTextNode(" " + labelTxt));
-      box.append(lab);
+      box.append(el("label", { className: "check" }, input, document.createTextNode(" " + labelTxt), help));
       return;
-    } else if (type0 === "integer" || type0 === "number") {
-      input = el("input", { type: "number", dataset: { key, kind: type0 } });
+    }
+    let input;
+    if (kind === "integer" || kind === "number") {
+      input = el("input", { type: "number", dataset: { key, kind } });
       if (spec.default != null) input.value = spec.default;
-    } else if (type0 === "array") {
-      input = el("input", { type: "text", placeholder: "comma,separated", dataset: { key, kind: "array" } });
+    } else if (kind === "array") {
+      // Left blank so the connector's own default applies; the default
+      // is shown as the placeholder.
+      input = el("input", { type: "text", placeholder: "comma, separated", dataset: { key, kind: "array" } });
+      if (Array.isArray(spec.default)) input.placeholder = spec.default.join(", ");
     } else {
       input = el("input", { type: "text", dataset: { key, kind: "string" } });
       if (spec.default != null) input.value = spec.default;
     }
     if (required.has(key)) input.required = true;
-    box.append(el("label", {}, document.createTextNode(labelTxt), input,
-      spec.description ? el("span", { className: "tag", textContent: spec.description }) : document.createTextNode("")));
+    box.append(el("label", {}, document.createTextNode(labelTxt), input, help));
   });
 }
 
 function collectOptions() {
   const options = {};
-  $$("#add-schema [data-key]").forEach((input) => {
+  $$("#add-form [data-key]").forEach((input) => {
     const { key, kind } = input.dataset;
     if (kind === "boolean") { options[key] = input.checked; return; }
     const v = input.value.trim();
@@ -1438,8 +1569,8 @@ function collectOptions() {
   if (advanced) {
     let parsed;
     try { parsed = JSON.parse(advanced); }
-    catch (e) { throw new Error("Advanced options is not valid JSON: " + e.message); }
-    Object.assign(options, parsed); // advanced JSON wins
+    catch (e) { throw new Error("Extra options is not valid JSON: " + e.message); }
+    Object.assign(options, parsed); // explicit JSON wins
   }
   return options;
 }
@@ -1447,7 +1578,9 @@ function collectOptions() {
 $("#add-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const result = $("#add-result");
+  const submit = $("#add-submit");
   result.textContent = "";
+  submit.disabled = true;
   try {
     const body = JSON.stringify({
       name: $("#add-name").value.trim(),
@@ -1457,16 +1590,58 @@ $("#add-form").addEventListener("submit", async (e) => {
       max_media_mb: parseInt($("#add-max-media").value || "0", 10),
       requires_vpn: $("#add-requires-vpn").checked,
     });
+    // Save keys first: a source whose key failed to save would just fail
+    // its first backup with the same "secret not set" error as before.
+    for (const input of $$("#add-secrets [data-secret]")) {
+      const value = input.value.trim();
+      if (!value) continue;
+      await api("/api/secrets", { method: "POST", body: JSON.stringify({ name: input.dataset.secret, value }) });
+      SAVED_SECRETS.add(input.dataset.secret);
+      input.value = "";
+    }
     const sc = await api("/api/sources", { method: "POST", body });
-    result.textContent = `Added ${sc.name} (${sc.type}).`;
-    result.className = "result st-success";
-    toast(`Source “${sc.name}” added.`, "ok");
-    $("#add-name").value = "";
+    EXISTING_SOURCES.push({ name: sc.name, type: sc.type });
+    showAddDone(sc);
   } catch (err) {
     result.textContent = err.message;
     result.className = "result st-failed";
+  } finally {
+    submit.disabled = false;
   }
 });
+
+function showAddDone(sc) {
+  const c = CONNECTORS[sc.type] || {};
+  const ac = c.auth_capture;
+  const needsLogin = Boolean(ac && ac.per_source && META.setup_enabled);
+  const box = $("#add-done");
+  box.innerHTML = "";
+  showAddStep("done");
+  $("#add-desc").textContent = "";
+  box.append(el("h3", { className: "add-title", textContent: `✓ ${sc.name} added` }));
+  const actions = el("div", { className: "row wrap done-actions" });
+  if (needsLogin) {
+    box.append(el("p", { className: "muted", textContent: `One more step: sign in to ${c.display_name || sc.type} so backups can reach your account.` }));
+    const login = el("button", { className: "btn primary", textContent: `${ac.label} (opens a browser)` });
+    login.addEventListener("click", () => sourceCapture(sc.name, ac.label, login));
+    actions.append(login, importControl(`/api/sources/${encodeURIComponent(sc.name)}/import`));
+  } else {
+    box.append(el("p", { className: "muted", textContent: "Ready to go. Run its first backup now, or let the schedule pick it up." }));
+  }
+  const run = el("button", { className: "btn" + (needsLogin ? "" : " primary"), textContent: "Back up now" });
+  // Only leave this panel once the backup actually started; on a refusal
+  // the error stays visible here instead of vanishing behind a page switch.
+  run.addEventListener("click", async () => {
+    if (await startBackup({ source: sc.name })) switchTab("dashboard");
+  });
+  const another = el("button", { className: "btn ghost", textContent: "Add another" });
+  another.addEventListener("click", showServicePicker);
+  const view = el("button", { className: "btn ghost", textContent: "View sources" });
+  view.addEventListener("click", () => switchTab("sources"));
+  actions.append(run, another, view);
+  box.append(actions);
+  toast(`Source “${sc.name}” added.`, "ok");
+}
 
 // --- export ----------------------------------------------------------------
 
@@ -1549,7 +1724,7 @@ async function loadResearch() {
       });
       setup.append(btn);
     } else {
-      setup.append(el("code", { textContent: "pip install 'daily-backup-system[research]'" }));
+      setup.append(el("code", { textContent: `pip install ${m.pip_requirements.join(" ")}` }));
     }
   }
 
@@ -1721,16 +1896,20 @@ function setBackupButtons(disabled) {
   if (disabled) $$(".run-btn").forEach((b) => { b.disabled = true; });
 }
 
+// Resolves true once the job has started, false if it was refused (the
+// error is already toasted), so callers can stay put on failure.
 async function startBackup(spec) {
-  if (activeES || backupStarting) { toast("A backup is already running.", "err"); return; }
+  if (activeES || backupStarting) { toast("A backup is already running.", "err"); return false; }
   backupStarting = true;
   setBackupButtons(true);
   try {
     const job = await api("/api/backup", { method: "POST", body: JSON.stringify(spec) });
     openProgress(job);
+    return true;
   } catch (e) {
     setBackupButtons(false);
     toast(e.message, "err");
+    return false;
   } finally {
     backupStarting = false;
   }

@@ -46,6 +46,7 @@ use axum::Router;
 
 pub mod api;
 pub mod auth;
+mod config_handle;
 pub mod envfile;
 pub mod jobs;
 mod scheduler;
@@ -87,12 +88,12 @@ pub(crate) struct AppState {
     /// serves the same purpose (changes exactly when the served assets
     /// could have changed, i.e. on every new build/restart).
     cache_stamp: String,
-    /// Loaded once at `dbs serve` startup (issue #170) — every `/api`
-    /// handler opens its own fresh `Storage`/`ConnectorRegistry` per
-    /// request from this, matching how each `dbs-cli` `cmd_*` function
-    /// already treats config: cheap to reuse, no shared mutable state
-    /// to guard across concurrent requests.
-    pub(crate) config: Arc<dbs_core::Config>,
+    /// Loaded at `dbs serve` startup (issue #170) and reloaded whenever
+    /// the UI edits `dbs.toml`. Each `/api` handler takes one snapshot
+    /// with `current()` and opens its own fresh `Storage`/
+    /// `ConnectorRegistry` from it, matching how each `dbs-cli` `cmd_*`
+    /// function treats config.
+    pub(crate) config: config_handle::ConfigHandle,
     /// `dbs serve --no-setup` inverted — reported by `/api/meta` and
     /// (issue #175) gates whether the in-UI setup routes actually work.
     pub(crate) allow_setup: bool,
@@ -150,7 +151,7 @@ pub fn router(token: Option<String>, opts: ServeOptions) -> Router {
     let security_config = Arc::new(SecurityConfig { token });
     let job_manager = Arc::new(jobs::JobManager::new());
     let research_job_manager = Arc::new(jobs::JobManager::new());
-    let config = Arc::new(opts.config);
+    let config = config_handle::ConfigHandle::new(opts.config);
     if opts.schedule {
         scheduler::spawn(
             config.clone(),
@@ -968,6 +969,9 @@ mod tests {
         assert_eq!(connectors.len(), 1);
         assert_eq!(connectors[0]["type"], "fixture");
         assert_eq!(connectors[0]["auth_capture"], serde_json::Value::Null);
+        // The fixture declares no pip packages, so the UI must not offer Install.
+        assert_eq!(connectors[0]["needs_install"], false);
+        assert_eq!(connectors[0]["install_requirements"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -1096,6 +1100,46 @@ mod tests {
         assert!(written.contains("type = \"fixture\""));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_created_source_is_listed_and_backup_able_without_a_restart() {
+        let dir = connectors_dir_with_a_fixture_connector("create-then-list");
+        let mut config = test_config();
+        config.connectors_dir = Some(dir);
+        let config_dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-create-then-list-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("dbs.toml");
+        std::fs::write(&config_path, "[dbs]\n").unwrap();
+        config.source_path = Some(config_path);
+        let app = router(
+            None,
+            ServeOptions {
+                config,
+                allow_setup: true,
+                schedule: false,
+            },
+        );
+        let (status, _) = post_json(
+            app.clone(),
+            "/api/sources",
+            serde_json::json!({"name": "fresh", "type": "fixture", "options": {}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The same running server must see it: this used to return [] and
+        // refuse the backup with "no such source" until a restart.
+        let (_, listed) = get_json(app.clone(), "/api/status").await;
+        assert_eq!(listed[0]["name"], "fresh");
+        let (status, body) =
+            post_json(app, "/api/backup", serde_json::json!({"source": "fresh"})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
     // -- DELETE/PATCH /api/sources/:name (issue #280) --------------------
 
     /// A real config file on disk with one `[sources.NAME]` block,
@@ -1204,6 +1248,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deleted_source_disappears_from_the_running_server() {
+        let config = config_dir_with_a_source("remove-then-list", "a", "fixture", true);
+        let app = router(
+            None,
+            ServeOptions {
+                config,
+                allow_setup: true,
+                schedule: false,
+            },
+        );
+        let (status, _) = delete_json(app.clone(), "/api/sources/a").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, listed) = get_json(app.clone(), "/api/status").await;
+        assert_eq!(listed, serde_json::json!([]));
+        let (status, body) =
+            post_json(app, "/api/backup", serde_json::json!({"source": "a"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("no such source"));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_source_reads_back_disabled_without_a_restart() {
+        let config = config_dir_with_a_source("disable-then-list", "a", "fixture", true);
+        let app = router(
+            None,
+            ServeOptions {
+                config,
+                allow_setup: true,
+                schedule: false,
+            },
+        );
+        let (status, _) = patch_json(
+            app.clone(),
+            "/api/sources/a",
+            serde_json::json!({"enabled": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, listed) = get_json(app, "/api/status").await;
+        assert_eq!(listed[0]["name"], "a");
+        assert_eq!(listed[0]["enabled"], false);
+    }
+
+    #[tokio::test]
     async fn api_delete_source_on_an_unconfigured_name_reports_an_error() {
         let (status, body) =
             delete_json(router(None, test_opts()), "/api/sources/nonexistent").await;
@@ -1296,6 +1386,31 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["secrets"], serde_json::json!([]));
         assert_eq!(body["allowed"], serde_json::json!(["FIXTURE_TOKEN"]));
+        assert_eq!(body["saved"], serde_json::json!([]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_secrets_reports_a_saved_key_even_with_no_source_using_it() {
+        let connectors_dir = connectors_dir_with_a_fixture_connector_requiring_auth(
+            "saved-unused",
+            "FIXTURE_SAVED_TOKEN",
+        );
+        let base_dir = temp_base_dir("saved-unused");
+        std::fs::write(base_dir.join(".env"), "FIXTURE_SAVED_TOKEN=abc\n").unwrap();
+        let mut config = test_config();
+        config.connectors_dir = Some(connectors_dir);
+        config.base_dir = base_dir;
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/secrets").await;
+        assert_eq!(status, StatusCode::OK);
+        // No source uses it, so it isn't in `secrets` — but it is saved.
+        assert_eq!(body["secrets"], serde_json::json!([]));
+        assert_eq!(body["saved"], serde_json::json!(["FIXTURE_SAVED_TOKEN"]));
     }
 
     #[cfg(unix)]

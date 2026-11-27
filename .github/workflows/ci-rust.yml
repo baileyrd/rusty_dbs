@@ -38,5 +38,13 @@ jobs:
         # clippy clean" standard.
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Build
+        # `cargo test` only builds each package's own test targets, but
+        # dbs-cli's connector_discovery tests copy the separate
+        # `dbs-connector-*` executables out of target/. Build every binary
+        # first so those tests don't fail with "No such file" depending on
+        # build order.
+        run: cargo build --workspace --all-features
+
       - name: Test
         run: cargo test --all-features

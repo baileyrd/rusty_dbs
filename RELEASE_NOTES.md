@@ -8,6 +8,152 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Web UI source edits take effect without restarting `dbs serve`
+**2026-11-27**
+
+`dbs serve` loaded `dbs.toml` once at startup and gave every handler the
+same frozen copy. The web UI also *edits* that file: adding, removing,
+enabling or disabling a source wrote it correctly, but the running server
+kept serving its startup copy. A newly added source didn't appear on
+Overview or Sources, and **Back up now** was refused with
+`no such source`, until the process restarted. The streamlined
+Add-source flow made this the first thing a new user hits. It was also
+true of the remove/enable/disable buttons added in #287.
+
+The new `ConfigHandle` (`dbs-web/src/config_handle.rs`) keeps the same
+snapshot model: each request takes one `Arc<Config>` and uses it
+throughout, so no request sees a half-applied change. The three
+source-editing endpoints then call `reload()` once their write succeeds.
+A reload that fails (say, the file was hand-edited into invalid TOML in
+the meantime) keeps the previous snapshot and reports
+"saved to the config file, but reloading it failed", because the write
+itself did succeed. The scheduler reads a fresh snapshot on each tick,
+so sources added in the UI also get scheduled. `start_backup` now uses
+one snapshot for both its "is this a configured source" check and the
+job.
+
+The done panel's **Back up now** used to switch to Overview even when the
+backup was refused, which hid the error. It now stays put and shows the
+error unless the job actually started.
+
+Verified in headless Edge against a running scratch server: add Raindrop,
+and Overview immediately shows `1 / 1` and lists it, as does Sources.
+Over HTTP, a backup of a newly added source is accepted and runs.
+
+### Fixed
+- Sources added, removed, enabled or disabled in the web UI only took
+  effect after restarting `dbs serve`.
+- **Back up now** hid the backup's refusal by switching pages.
+
+### Added
+- `ConfigHandle`, with 5 unit tests: reload, snapshot isolation, a broken
+  file keeps the previous config, clones share state, and no-op without
+  a file. Also 2 cross-platform HTTP tests (delete, then disable, each
+  followed by a read-back on the same router) and a Unix one (create,
+  list, back up). Verified to fail with the reload disabled.
+
+### Security
+- None.
+
+---
+
+## Streamline the web UI's setup flow into one Add-source screen
+**2026-11-27**
+
+Adding one source used to take three separate pages, and nothing linked
+them: Install on **Connectors**, paste the token on **API keys**, then
+**Sources -> Add source** with a dropdown of internal type codes and raw
+option names. Saving a key without adding a source left Overview at
+`0 / 0` with no hint why.
+
+**Add source is now a single guided flow:**
+1. Pick a service from a grid of names and descriptions.
+2. One form for everything that service needs: an install notice (only
+   for connectors that declare Python packages), the API key (saved to
+   `.env` on submit), a login note for capture-based connectors, and only
+   the *required* options. Everything optional, including media/VPN
+   settings and raw JSON, folds under **More options**.
+3. A done panel with the next step: sign in (per-source login
+   connectors) or **Back up now**.
+
+**Other changes:**
+- An empty source list on Overview and Sources now shows a primary
+  "+ Add your first source" button. The old link was default-blue on a
+  near-black background and nearly invisible.
+- Connectors, API keys and Verify moved into a collapsed **Advanced**
+  sidebar group. It opens automatically when one of its pages is active.
+- After an install started from Connectors, the message now reads
+  "Installed. Next: add a source that uses it" instead of a bare "Done".
+- Dark-mode `--text-3` changed from `#6e6f79` to `#90919b`. That raises
+  tertiary text from about 3.6:1 to at least 4.7:1 on every dark surface
+  (WCAG AA).
+
+**API changes:**
+- `GET /api/connectors` rows gain `needs_install` and
+  `install_requirements`, both taken from the connector's declared
+  `pip_requirements` and `needs_playwright_browser`. The UI used to read
+  a `ready` field this endpoint never sent, so it showed **Install** on
+  every connector, including token-only ones like Pinboard, where
+  clicking it did nothing. These fields describe what a connector
+  *declares*, not whether it is already installed. Checking that would
+  mean spawning Python for each connector on every list.
+- `GET /api/secrets` gains `saved`: the allowed keys that already have a
+  value, even when no source uses them yet. This lets the form show
+  "saved" for a key set before its source exists.
+
+Secret fields work out whether they are optional from the connector's
+shape, because the handshake doesn't declare it:
+- A login-capture connector's other keys are optional extras.
+- `*_FILE` and `*_DIR` keys take a path.
+- A connector's single typed key is required.
+
+Verified by driving headless Edge through the whole flow against a
+scratch config: empty Overview, service grid, Raindrop and Skool forms,
+submit, done panel, and Connectors. No console errors.
+
+### Added
+- `needs_install`/`install_requirements` on `/api/connectors`, and
+  `saved` on `/api/secrets`. Covered by 4 cross-platform unit tests plus
+  Unix integration assertions.
+
+### Fixed
+- The phantom Install button on connectors that need nothing installed.
+- The nearly invisible empty-state link.
+
+### Security
+- None. Secret values still go only to `.env` and are never echoed back.
+
+---
+
+## Drop install hints for the Python package this port replaced
+**2026-11-27**
+
+The `dbs init` config template and the Research page's fallback hint
+still told users to `pip install 'daily-backup-system[<extra>]'` (and
+`pip install -e ".[skool]"`). That is the Python reference package's own
+install command, and that package does not exist in this Rust port, so
+anyone who followed it hit a dead end. The hints now name what is actually
+needed. Reddit and Skool still drive a browser through Python and
+Playwright, and YouTube and Skool still need yt-dlp, so those `pip`
+steps stay. Each hint first points to the Connectors page's Install button
+(`dbs serve --allow-setup`), which runs those steps for you.
+
+The Research page's no-setup fallback now builds its `pip install`
+command from `/api/research/meta`'s `pip_requirements`, so it can't drift
+from the real requirements again.
+
+Comments that describe how the Python reference behaved were left alone;
+they document parity decisions and are still accurate.
+
+### Fixed
+- Stale `daily-backup-system[...]` install instructions in
+  `config.toml.template` and `app.js`.
+
+### Security
+- None.
+
+---
+
 ## Knowledge pipeline batch runner: Raindrop source, fetch chain, ledger (Mill Board #1308)
 **2026-11-24**
 

@@ -142,6 +142,7 @@ async fn meta(State(state): State<AppState>) -> Json<Value> {
         "core_api_version": CURRENT_API_VERSION,
         "config_path": state
             .config
+            .current()
             .source_path
             .as_deref()
             .map(dbs_core::display_path)
@@ -161,7 +162,7 @@ async fn status(
     State(state): State<AppState>,
     Query(params): Query<SourceParam>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -176,7 +177,7 @@ async fn status(
 }
 
 async fn metrics(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -205,7 +206,7 @@ async fn history(
     State(state): State<AppState>,
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -227,7 +228,7 @@ async fn history(
 /// joined to it; both are "fail-closed, disable Run" per the
 /// frontend's own comment), and a human `detail` string.
 async fn vpn(State(state): State<AppState>) -> Json<Value> {
-    let config = &state.config;
+    let config = state.config.current();
     let relevant = config.sources.values().any(|s| s.enabled && s.requires_vpn);
     if !relevant {
         return Json(json!({"relevant": false, "up": null, "detail": ""}));
@@ -268,7 +269,7 @@ async fn verify(
     State(state): State<AppState>,
     Query(params): Query<SourceParam>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -399,7 +400,7 @@ async fn items(
     let limit: u32 = q.one("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
     let offset: u32 = q.one("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -430,7 +431,7 @@ async fn item_detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Option<ItemRow>, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -479,7 +480,7 @@ fn mime_from_blob_row(row: &ItemRow) -> String {
 /// how `app.js` uses it directly as an `<img src>`/download `<a href>`
 /// (`openItemDrawer`'s media list).
 async fn media(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Response, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Option<ItemRow>, DbsError> {
         let storage = open_storage(&config)?;
         storage.get_media_blob(id)
@@ -523,7 +524,7 @@ enum ThumbOutcome {
 /// proxying bytes this server never stored (YouTube connector items
 /// have no image media rows at all — `app.js`'s own comment on this).
 async fn thumb(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Response, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let outcome = tokio::task::spawn_blocking(move || -> Result<ThumbOutcome, DbsError> {
         let mut storage = open_storage(&config)?;
         let item = {
@@ -593,25 +594,57 @@ async fn thumb(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Res
 /// so the `Vec<ConnectorInfo>` is returned as-is rather than wrapped in
 /// an envelope.
 async fn connectors(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
         let runner = SubprocessRunner::new(&config);
         let service = BackupService::new(&mut storage, &config, &registry, &runner);
         let rows = service.list_connectors();
-        Ok(serde_json::to_value(rows).unwrap_or(Value::Null))
+        let mut value = serde_json::to_value(rows).unwrap_or(Value::Null);
+        if let Some(list) = value.as_array_mut() {
+            for row in list {
+                annotate_install_requirements(row, &registry);
+            }
+        }
+        Ok(value)
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok(Json(result))
 }
 
+/// Adds `install_requirements` (the labels of what the Install button
+/// would run: pip packages, plus `chromium` for Playwright) and
+/// `needs_install` to one `/api/connectors` row, from the connector's
+/// declared handshake. Without this the UI had no way to tell a
+/// connector with nothing to install (Pinboard, Raindrop, ...) from one
+/// that needs Python packages, so it offered Install on every one.
+/// This says what is *declared*, not whether it is already installed:
+/// checking that would mean spawning Python per connector on every list.
+fn annotate_install_requirements(row: &mut Value, registry: &dbs_core::ConnectorRegistry) {
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+    let Some(type_) = obj.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let mut requirements: Vec<String> = Vec::new();
+    if let Some(rc) = registry.get(type_) {
+        requirements.extend(rc.handshake.pip_requirements.iter().cloned());
+        if rc.handshake.needs_playwright_browser {
+            requirements.push("chromium (Playwright)".to_string());
+        }
+    }
+    obj.insert("needs_install".to_string(), json!(!requirements.is_empty()));
+    obj.insert("install_requirements".to_string(), json!(requirements));
+}
+
 /// `GET /api/sources` — every configured source, `name`/`type`/
 /// `enabled`/`schedule`/`backed_up` per `BackupService::list_sources`.
 /// `app.js`'s `loadSourceDetail` fetches this as a flat array too.
 async fn sources(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -651,7 +684,7 @@ async fn create_source(
     State(state): State<AppState>,
     Json(body): Json<CreateSourceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name = body.name.clone();
     let type_ = body.type_.clone();
     tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
@@ -670,7 +703,22 @@ async fn create_source(
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    reload_config(&state)?;
     Ok(Json(json!({"name": name, "type": type_})))
+}
+
+/// Makes a just-written `dbs.toml` the config every later request sees.
+/// Without this the edit only took effect after `dbs serve` restarted:
+/// a new source didn't appear and couldn't be backed up. The write itself
+/// already succeeded by the time this runs, so a failure here says so
+/// rather than implying nothing was saved.
+fn reload_config(state: &AppState) -> Result<(), ApiError> {
+    state.config.reload().map_err(|e| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("saved to the config file, but reloading it failed: {e}"),
+        )
+    })
 }
 
 /// `DELETE /api/sources/:name` — bridges `BackupService::remove_source`,
@@ -680,7 +728,7 @@ async fn delete_source(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name_for_task = name.clone();
     tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
         let mut storage = open_storage(&config)?;
@@ -691,6 +739,7 @@ async fn delete_source(
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    reload_config(&state)?;
     Ok(Json(json!({"name": name})))
 }
 
@@ -709,7 +758,7 @@ async fn update_source(
     Path(name): Path<String>,
     Json(body): Json<UpdateSourceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name_for_task = name.clone();
     let enabled = body.enabled;
     tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
@@ -721,6 +770,7 @@ async fn update_source(
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    reload_config(&state)?;
     Ok(Json(json!({"name": name, "enabled": enabled})))
 }
 
@@ -763,7 +813,9 @@ fn allowed_secret_keys(
 /// `in_env_file`/`in_process_env`/`sources`, matching `loadSecrets`'s
 /// (`app.js`) per-row rendering exactly); `allowed`: every secret key
 /// any *registered* connector declares, configured or not — the wider
-/// list `loadSecrets`' "Set another key" picker draws from. `env_file`
+/// list `loadSecrets`' "Set another key" picker draws from. `saved`: the
+/// subset of `allowed` that already has a value (`.env` or process env),
+/// used by the Add-source flow before any source needs the key. `env_file`
 /// is the `.env` path being read/written, shown as-is in the UI.
 /// `unresolved_source_types` is every distinct `type` a configured
 /// source names that no discovered connector answers to — an empty
@@ -773,7 +825,7 @@ fn allowed_secret_keys(
 /// this field lets `loadSecrets` tell the two apart instead of quietly
 /// claiming no key is required.
 async fn secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let (allowed, keys_by_type) = allowed_secret_keys(&config)?;
 
@@ -818,10 +870,20 @@ async fn secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError>
             })
             .collect();
 
+        // Every allowed key that already has a value, whether or not a
+        // configured source uses it yet. The Add-source flow needs this
+        // to show "already saved" for a key the user set before creating
+        // its source — `secrets` alone only covers keys in use.
+        let saved: Vec<&String> = allowed
+            .iter()
+            .filter(|key| in_env_file.contains(*key) || std::env::var(key).is_ok())
+            .collect();
+
         Ok(json!({
             "env_file": dbs_core::display_path(&env_path),
             "secrets": secrets,
             "allowed": allowed,
+            "saved": saved,
             "unresolved_source_types": unresolved_types,
         }))
     })
@@ -851,7 +913,7 @@ async fn set_secret(
     State(state): State<AppState>,
     Json(body): Json<SetSecretRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name = body.name.clone();
     tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
         let (allowed, _keys_by_type) = allowed_secret_keys(&config)?;
@@ -885,7 +947,7 @@ async fn delete_secret(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let name_for_task = name.clone();
     let removed = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
         crate::envfile::unset_var(&config.env_file_path(), &name_for_task)
@@ -987,6 +1049,7 @@ async fn start_backup(
     State(state): State<AppState>,
     Json(body): Json<StartBackupRequest>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
+    let config = state.config.current();
     if !body.all {
         match &body.source {
             None => {
@@ -995,7 +1058,7 @@ async fn start_backup(
                     "either \"source\" or \"all\" must be given".to_string(),
                 ))
             }
-            Some(name) if !state.config.sources.contains_key(name) => {
+            Some(name) if !config.sources.contains_key(name) => {
                 return Err(ApiError(
                     StatusCode::BAD_REQUEST,
                     format!("no such source: {name:?}"),
@@ -1005,7 +1068,6 @@ async fn start_backup(
         }
     }
 
-    let config = state.config.clone();
     let spec = serde_json::to_value(&body).unwrap_or(Value::Null);
     let all = body.all;
     let source = body.source;
@@ -1118,7 +1180,7 @@ async fn install_connector(
     Path(type_): Path<String>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
     require_setup_enabled(&state)?;
-    let config = state.config.clone();
+    let config = state.config.current();
     let type_for_job = type_.clone();
     let result = state
         .job_manager
@@ -1151,7 +1213,7 @@ async fn start_capture_job(
     target: String,
 ) -> Result<Json<JobSnapshot>, ApiError> {
     require_setup_enabled(state)?;
-    let config = state.config.clone();
+    let config = state.config.current();
     let target_for_job = target.clone();
     let result =
         state
@@ -1247,7 +1309,7 @@ async fn import_capture(
         )
     })?;
 
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -1340,7 +1402,7 @@ async fn import_source(
 /// and which fields its config overrode. Mirrors the reference's
 /// `GET /api/export/profiles` (`src/dbs/web/app.py`).
 async fn export_profiles(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = state.config.clone();
+    let config = state.config.current();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -1450,7 +1512,7 @@ async fn export_download(
     };
     let ext_for_job = ext.clone();
 
-    let config = state.config.clone();
+    let config = state.config.current();
     let data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, DbsError> {
         let mut storage = open_storage(&config)?;
         let (registry, _report) = build_registry(&config);
@@ -1528,7 +1590,7 @@ async fn export_notes_route(
     Json(body): Json<ExportNotesRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let since = parse_date_param(body.since)?;
-    let config = state.config.clone();
+    let config = state.config.current();
     let out_dir = PathBuf::from(&body.out_dir);
     let sources = body.source;
     let item_types = body.item_type;
@@ -1619,9 +1681,9 @@ async fn research_meta(State(state): State<AppState>) -> Json<Value> {
     } else {
         pip_requirements.clone()
     };
-    let configured = resolve_auth_state(&state.config.base_dir).is_some();
-    let mut youtube_sources: Vec<&String> = state
-        .config
+    let config = state.config.current();
+    let configured = resolve_auth_state(&config.base_dir).is_some();
+    let mut youtube_sources: Vec<&String> = config
         .sources
         .iter()
         .filter(|(_, sc)| sc.type_ == "youtube")
@@ -1762,7 +1824,7 @@ async fn start_research(
         ));
     }
     let backup_mode = body.mode == "backup";
-    let config = state.config.clone();
+    let config = state.config.current();
     let spec = json!({
         "mode": if backup_mode { "backup" } else { "search" },
         "topic": topic,
@@ -1917,4 +1979,75 @@ async fn research_report(
         report,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbs_core::{Capabilities, ConnectorRegistry, Handshake, RegisteredConnector};
+
+    fn fake_rc(type_: &str, pip: &[&str], playwright: bool) -> RegisteredConnector {
+        RegisteredConnector {
+            type_: type_.to_string(),
+            plugin_id: format!("{type_}:{type_}"),
+            dist_name: type_.to_string(),
+            is_builtin: true,
+            command: std::path::PathBuf::from("unused"),
+            args: Vec::new(),
+            handshake: Handshake {
+                type_: type_.to_string(),
+                core_api_version: 1,
+                schema_version: 1,
+                capabilities: Capabilities::default(),
+                secret_keys: vec![],
+                item_kinds: vec!["item".to_string()],
+                display_name: None,
+                description: None,
+                export_profile: None,
+                auth_capture: None,
+                volatile_fields: Vec::new(),
+                pip_requirements: pip.iter().map(|s| s.to_string()).collect(),
+                needs_playwright_browser: playwright,
+                config_schema: Value::Null,
+            },
+        }
+    }
+
+    #[test]
+    fn a_token_only_connector_needs_no_install() {
+        let registry = ConnectorRegistry::from_resolved([fake_rc("pinboard", &[], false)]);
+        let mut row = json!({"type": "pinboard"});
+        annotate_install_requirements(&mut row, &registry);
+        assert_eq!(row["needs_install"], false);
+        assert_eq!(row["install_requirements"], json!([]));
+    }
+
+    #[test]
+    fn pip_packages_and_playwright_are_listed_in_install_order() {
+        let registry =
+            ConnectorRegistry::from_resolved([fake_rc("skool", &["playwright", "yt-dlp"], true)]);
+        let mut row = json!({"type": "skool"});
+        annotate_install_requirements(&mut row, &registry);
+        assert_eq!(row["needs_install"], true);
+        assert_eq!(
+            row["install_requirements"],
+            json!(["playwright", "yt-dlp", "chromium (Playwright)"])
+        );
+    }
+
+    #[test]
+    fn a_row_for_an_unknown_type_is_marked_as_needing_nothing() {
+        let registry = ConnectorRegistry::new();
+        let mut row = json!({"type": "ghost"});
+        annotate_install_requirements(&mut row, &registry);
+        assert_eq!(row["needs_install"], false);
+    }
+
+    #[test]
+    fn a_malformed_row_is_left_untouched() {
+        let registry = ConnectorRegistry::new();
+        let mut row = json!(["not", "an", "object"]);
+        annotate_install_requirements(&mut row, &registry);
+        assert_eq!(row, json!(["not", "an", "object"]));
+    }
 }

@@ -44,7 +44,8 @@ poll_trash = true                # detect deletions quickly via the Trash collec
 token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 
 # Reddit saved posts/comments (browser session, no API token).
-# Needs the extra:  pip install 'daily-backup-system[reddit]' && playwright install chromium
+# Needs Python with Playwright + Chromium: click Install on the Connectors page
+# (`dbs serve --allow-setup`), or run  pip install playwright && playwright install chromium
 # REDDIT_SESSION_DIR must point at a logged-in Playwright session directory.
 # [sources.reddit]
 # type = "reddit"
@@ -54,7 +55,7 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # session_dir_env = "REDDIT_SESSION_DIR"
 
 # YouTube lists: Watch Later, Liked, (history), and your playlists (yt-dlp).
-# Needs the extra:  pip install 'daily-backup-system[youtube]'
+# Needs yt-dlp: click Install on the Connectors page, or run  pip install "yt-dlp[default]" nodejs-wheel
 # Auth: a cookies.txt via YOUTUBE_COOKIES_FILE, OR set cookies_from_browser.
 # [sources.youtube]
 # type = "youtube"
@@ -67,8 +68,9 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # # cookies_from_browser = "chrome"
 
 # Skool: back up your communities/courses/lessons via a logged-in browser
-# session. Needs the extra:  pip install 'daily-backup-system[skool]' && playwright
-# install chromium. Click "Skool login" in the UI to capture the session
+# session. Needs Python with Playwright + Chromium, yt-dlp, nodejs-wheel and
+# ffmpeg-downloader: click Install on the Connectors page (`dbs serve
+# --allow-setup`) to install them all. Click "Skool login" in the UI to capture the session
 # (SKOOL_SESSION_DIR). Resource files + lesson videos are saved under
 # <download_root>/<source-name> (download_videos, on by default; yt-dlp +
 # auto-managed ffmpeg); set downloads_dir to override the location.
@@ -87,8 +89,8 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 #   decrypt with DPAPI") against modern Chrome, so prefer the captured file.
 #   "Sign in to confirm you're not a bot" with VALID cookies almost always
 #   means yt-dlp couldn't run its JS challenge solver — this needs the
-#   `skool` extra's nodejs-wheel dependency (auto-managed, no system install;
-#   re-run `pip install -e ".[skool]"` on existing installs to pick it up).
+#   nodejs-wheel package (no system Node install; click Install on the
+#   Connectors page again, or `pip install nodejs-wheel`, to pick it up).
 #   video_extractor_args pins yt-dlp to specific player client(s), e.g.
 #   { youtube = { player_client = ["web_embedded"] } } — leave this UNSET
 #   unless you've confirmed yt-dlp's own default multi-client fallback fails

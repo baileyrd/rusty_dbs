@@ -65,6 +65,14 @@ yet, so everything so far is under Unreleased.
   a source required hand-editing `dbs.toml`.
 
 ### Changed
+- The web UI's setup now happens on one guided **Add source** screen:
+  pick a service, then install, paste its key, sign in and set the
+  required options on a single form. Optional settings fold under
+  **More options**. Connectors, API keys and Verify moved into a
+  collapsed **Advanced** sidebar group. Dark-mode tertiary text now meets
+  WCAG AA contrast, all UI text is at least 11px (sidebar group labels,
+  tile labels, table headers and Library item details were 10–10.5px),
+  and links default to the accent colour instead of the browser's blue.
 - `[dbs] http_timeout`/`http_rate_limit_per_min` now reach the connector
   subprocess's real HTTP client instead of being parsed and unused.
 - `[dbs] batch_max` now drives the engine's actual commit-flush cadence,
@@ -75,6 +83,21 @@ yet, so everything so far is under Unreleased.
   defaults instead of requiring hand-written JSON in the Advanced textarea.
 
 ### Fixed
+- Sources added, removed, enabled or disabled in the web UI now take
+  effect immediately. Previously the server kept serving the config it
+  started with, so a new source didn't appear and **Back up now** was
+  refused with "no such source" until `dbs serve` restarted.
+- The web UI's Install button appeared on every connector, including ones
+  with nothing to install, because it read a `ready` field the API never
+  sent. `/api/connectors` now reports `needs_install` and
+  `install_requirements`.
+- The web UI's empty-state "Add a source" link was nearly invisible in
+  dark mode. It is now a primary button.
+- The `dbs init` config template and the Research page no longer tell
+  users to `pip install 'daily-backup-system[...]'`, which is the Python
+  reference package's install command and not part of this port. They now
+  name the real dependencies (Playwright, yt-dlp, nodejs-wheel) and point
+  to the Connectors page's Install button.
 - The Research page's "From my backups" mode now warns upfront (and
   disables "Run research") when no YouTube-type source is configured,
   instead of only failing after a wasted round trip through a job that
