@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/dbs-core",
     "crates/dbs-connector-support",
+    "crates/dbs-clip",
+    "crates/dbs-pipeline",
     "crates/dbs-cli",
     "crates/dbs-web",
     "crates/dbs-research",

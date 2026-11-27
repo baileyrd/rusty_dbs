@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Why Ownership Matters: A Field Guide | Example Blog</title>
+<meta name="author" content="Ada Lovelace">
+<meta name="description" content="How ownership shapes Rust APIs, with examples.">
+<meta property="article:published_time" content="2026-10-30T08:15:00+00:00">
+<meta name="keywords" content="rust, ownership, api design">
+<script>window.analytics = {};</script>
+<style>body { font-family: serif; }</style>
+</head><body class="post-template">
+<header class="site-header"><nav class="main-nav"><a href="/">Home</a> <a href="/about">About</a></nav></header>
+<div class="layout">
+  <main id="main" class="site-main">
+    <article class="post">
+      <div class="post-meta">By Ada, 5 min read</div>
+      <div class="entry-content">
+        <h2 id="intro">Introduction <a class="anchor" href="#intro">#</a></h2>
+        <p>Ownership is the idea that every value has exactly one owner, and that the owner decides when the value is dropped. It sounds small, but it changes how APIs are shaped.</p>
+        <p>Consider a function that takes a <code>String</code> by value. The caller gives up the string, and the compiler checks that it is not used again, which removes a whole class of bugs.</p>
+        <figure><img data-src="/img/borrow.png" src="data:image/gif;base64,R0lGOD" alt="Borrow diagram"><figcaption>Borrowing, drawn.</figcaption></figure>
+        <h3>Three rules</h3>
+        <ul><li>Each value has one owner.</li><li>Ownership can move, <em>explicitly</em>.<ul><li>Moves are cheap.</li></ul></li><li>When the owner goes, the value is dropped.</li></ul>
+        <pre><code class="language-rust">fn consume(s: String) {
+    println!("{s}");
+}</code></pre>
+        <blockquote><p>Make illegal states unrepresentable, and the compiler becomes your reviewer, tirelessly, on every build.</p></blockquote>
+        <p>Read more in <a href="/posts/borrowing">the borrowing post</a>, or the <a href="https://doc.rust-lang.org/book/">official book</a>, which covers lifetimes, traits, and smart pointers.</p>
+        <div class="share-buttons"><a href="https://twitter.com/share">Share on Twitter</a></div>
+      </div>
+    </article>
+    <section id="comments" class="comments-area">
+      <h3>2 comments</h3>
+      <div class="comment"><p>Great post, thanks. This finally made it click for me, honestly, after years.</p></div>
+      <div class="comment"><p>I disagree with the second rule, but otherwise, this is a solid summary, well done.</p></div>
+    </section>
+  </main>
+  <aside class="sidebar"><p>Subscribe to the newsletter for weekly posts about systems, languages, and tools.</p></aside>
+</div>
+<footer class="site-footer"><p>Copyright 2026 Example Blog, all rights reserved, worldwide.</p></footer>
+</body></html>
