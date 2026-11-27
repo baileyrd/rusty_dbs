@@ -968,6 +968,9 @@ mod tests {
         assert_eq!(connectors.len(), 1);
         assert_eq!(connectors[0]["type"], "fixture");
         assert_eq!(connectors[0]["auth_capture"], serde_json::Value::Null);
+        // The fixture declares no pip packages, so the UI must not offer Install.
+        assert_eq!(connectors[0]["needs_install"], false);
+        assert_eq!(connectors[0]["install_requirements"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -1296,6 +1299,31 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["secrets"], serde_json::json!([]));
         assert_eq!(body["allowed"], serde_json::json!(["FIXTURE_TOKEN"]));
+        assert_eq!(body["saved"], serde_json::json!([]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_secrets_reports_a_saved_key_even_with_no_source_using_it() {
+        let connectors_dir = connectors_dir_with_a_fixture_connector_requiring_auth(
+            "saved-unused",
+            "FIXTURE_SAVED_TOKEN",
+        );
+        let base_dir = temp_base_dir("saved-unused");
+        std::fs::write(base_dir.join(".env"), "FIXTURE_SAVED_TOKEN=abc\n").unwrap();
+        let mut config = test_config();
+        config.connectors_dir = Some(connectors_dir);
+        config.base_dir = base_dir;
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/secrets").await;
+        assert_eq!(status, StatusCode::OK);
+        // No source uses it, so it isn't in `secrets` — but it is saved.
+        assert_eq!(body["secrets"], serde_json::json!([]));
+        assert_eq!(body["saved"], serde_json::json!(["FIXTURE_SAVED_TOKEN"]));
     }
 
     #[cfg(unix)]

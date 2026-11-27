@@ -47,14 +47,6 @@
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="8" cy="3.6" rx="5.5" ry="2.1"/><path d="M2.5 3.6v8.8c0 1.16 2.46 2.1 5.5 2.1s5.5-.94 5.5-2.1V3.6"/><path d="M2.5 8c0 1.16 2.46 2.1 5.5 2.1s5.5-.94 5.5-2.1"/></svg>
         Sources <span class="count" id="nav-source-count"></span>
       </button>
-      <button class="nav-item" data-tab="connectors">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 2.5v4M10 2.5v4M4 6.5h8v2.2a4 4 0 0 1-8 0V6.5ZM8 12.7v1.8"/></svg>
-        Connectors
-      </button>
-      <button class="nav-item" data-tab="secrets">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.4" cy="10.6" r="3.4"/><path d="M7.9 8.1 13.5 2.5M11 5l2 2"/></svg>
-        API keys
-      </button>
 
       <div class="nav-group-label">Tools</div>
       <button class="nav-item" data-tab="export">
@@ -65,10 +57,24 @@
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.1 3.1"/></svg>
         Research
       </button>
-      <button class="nav-item" data-tab="verify">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 13.5 4v4c0 3.2-2.3 5.4-5.5 6.2C4.8 13.4 2.5 11.2 2.5 8V4L8 1.8Z"/><path d="m5.8 8 1.6 1.6 2.9-3"/></svg>
-        Verify
-      </button>
+
+      <!-- Rarely needed once setup is done: Add source covers installing,
+           keys and logins, so these stay one click away but folded. -->
+      <details class="nav-advanced" id="nav-advanced">
+        <summary class="nav-group-label">Advanced</summary>
+        <button class="nav-item" data-tab="connectors">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 2.5v4M10 2.5v4M4 6.5h8v2.2a4 4 0 0 1-8 0V6.5ZM8 12.7v1.8"/></svg>
+          Connectors
+        </button>
+        <button class="nav-item" data-tab="secrets">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.4" cy="10.6" r="3.4"/><path d="M7.9 8.1 13.5 2.5M11 5l2 2"/></svg>
+          API keys
+        </button>
+        <button class="nav-item" data-tab="verify">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 13.5 4v4c0 3.2-2.3 5.4-5.5 6.2C4.8 13.4 2.5 11.2 2.5 8V4L8 1.8Z"/><path d="m5.8 8 1.6 1.6 2.9-3"/></svg>
+          Verify
+        </button>
+      </details>
     </nav>
 
     <div class="sidebar-foot" id="meta"></div>
@@ -281,33 +287,51 @@
       <section id="tab-add" class="tab hidden">
         <div class="view-head">
           <h2>Add source</h2>
-          <span class="desc">Pick a connector and name the new source</span>
+          <span class="desc" id="add-desc">Choose what to back up</span>
           <div class="actions"><button class="btn ghost small" data-goto="sources">‹ Back to sources</button></div>
         </div>
-        <form id="add-form" class="card pad form">
-          <label>Name <input id="add-name" required placeholder="raindrop-personal" /></label>
-          <label>Type
-            <select id="add-type" required></select>
-          </label>
-          <div id="add-schema" class="schema"></div>
+
+        <!-- Step 1: pick a service -->
+        <div id="add-pick" class="service-grid"></div>
+
+        <!-- Step 2: everything that service needs, on one form -->
+        <form id="add-form" class="card pad form hidden">
+          <div class="add-form-head">
+            <div>
+              <h3 id="add-title" class="add-title"></h3>
+              <div id="add-blurb" class="muted"></div>
+            </div>
+            <button type="button" class="btn ghost small" id="add-change">Change</button>
+          </div>
+          <input type="hidden" id="add-type" />
+          <div id="add-install"></div>
+          <label>Name <input id="add-name" required /></label>
+          <div id="add-secrets" class="form"></div>
           <div id="add-capture"></div>
-          <label class="check"><input type="checkbox" id="add-store-media" /> Store media bytes in the database</label>
-          <label class="check"><input type="checkbox" id="add-requires-vpn" /> Requires VPN (back up through the VPN wrapper only)</label>
-          <label>Max media size per file (MB, 0 = no limit)
-            <input id="add-max-media" type="number" min="0" value="0" />
-          </label>
-          <details>
-            <summary>Advanced: options as JSON</summary>
-            <textarea id="add-options" rows="6" placeholder='{ "collection_id": 0 }'></textarea>
+          <div id="add-schema" class="form"></div>
+          <details id="add-more">
+            <summary>More options</summary>
+            <div class="form more-body">
+              <div id="add-secrets-optional" class="form"></div>
+              <div id="add-schema-optional" class="form"></div>
+              <label class="check"><input type="checkbox" id="add-store-media" /> Store media bytes in the database</label>
+              <label class="check"><input type="checkbox" id="add-requires-vpn" /> Requires VPN (back up through the VPN wrapper only)</label>
+              <label>Max media size per file (MB, 0 = no limit)
+                <input id="add-max-media" type="number" min="0" value="0" />
+              </label>
+              <label>Extra options as JSON
+                <textarea id="add-options" rows="4"></textarea>
+              </label>
+            </div>
           </details>
           <div class="row">
-            <button type="submit" class="btn primary">Add source</button>
+            <button type="submit" class="btn primary" id="add-submit">Add source</button>
             <span id="add-result" class="result"></span>
           </div>
         </form>
-        <p class="muted hint-line">Secrets are never stored in the config — reference them by name via a
-          <code>*_env</code> option (e.g. <code>token_env = RAINDROP_TOKEN</code>) and set the
-          value in <strong>API keys</strong> (it writes your <code>.env</code>).</p>
+
+        <!-- Step 3: done, with the obvious next actions -->
+        <div id="add-done" class="card pad hidden"></div>
       </section>
 
       <!-- ============ Connectors ============ -->

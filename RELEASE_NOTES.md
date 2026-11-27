@@ -8,6 +8,74 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Streamline the web UI's setup flow into one Add-source screen
+**2026-11-27**
+
+Adding one source used to take three separate pages, and nothing linked
+them: Install on **Connectors**, paste the token on **API keys**, then
+**Sources -> Add source** with a dropdown of internal type codes and raw
+option names. Saving a key without adding a source left Overview at
+`0 / 0` with no hint why.
+
+**Add source is now a single guided flow:**
+1. Pick a service from a grid of names and descriptions.
+2. One form for everything that service needs: an install notice (only
+   for connectors that declare Python packages), the API key (saved to
+   `.env` on submit), a login note for capture-based connectors, and only
+   the *required* options. Everything optional, including media/VPN
+   settings and raw JSON, folds under **More options**.
+3. A done panel with the next step: sign in (per-source login
+   connectors) or **Back up now**.
+
+**Other changes:**
+- An empty source list on Overview and Sources now shows a primary
+  "+ Add your first source" button. The old link was default-blue on a
+  near-black background and nearly invisible.
+- Connectors, API keys and Verify moved into a collapsed **Advanced**
+  sidebar group. It opens automatically when one of its pages is active.
+- After an install started from Connectors, the message now reads
+  "Installed. Next: add a source that uses it" instead of a bare "Done".
+- Dark-mode `--text-3` changed from `#6e6f79` to `#90919b`. That raises
+  tertiary text from about 3.6:1 to at least 4.7:1 on every dark surface
+  (WCAG AA).
+
+**API changes:**
+- `GET /api/connectors` rows gain `needs_install` and
+  `install_requirements`, both taken from the connector's declared
+  `pip_requirements` and `needs_playwright_browser`. The UI used to read
+  a `ready` field this endpoint never sent, so it showed **Install** on
+  every connector, including token-only ones like Pinboard, where
+  clicking it did nothing. These fields describe what a connector
+  *declares*, not whether it is already installed. Checking that would
+  mean spawning Python for each connector on every list.
+- `GET /api/secrets` gains `saved`: the allowed keys that already have a
+  value, even when no source uses them yet. This lets the form show
+  "saved" for a key set before its source exists.
+
+Secret fields work out whether they are optional from the connector's
+shape, because the handshake doesn't declare it:
+- A login-capture connector's other keys are optional extras.
+- `*_FILE` and `*_DIR` keys take a path.
+- A connector's single typed key is required.
+
+Verified by driving headless Edge through the whole flow against a
+scratch config: empty Overview, service grid, Raindrop and Skool forms,
+submit, done panel, and Connectors. No console errors.
+
+### Added
+- `needs_install`/`install_requirements` on `/api/connectors`, and
+  `saved` on `/api/secrets`. Covered by 4 cross-platform unit tests plus
+  Unix integration assertions.
+
+### Fixed
+- The phantom Install button on connectors that need nothing installed.
+- The nearly invisible empty-state link.
+
+### Security
+- None. Secret values still go only to `.env` and are never echoed back.
+
+---
+
 ## Drop install hints for the Python package this port replaced
 **2026-11-27**
 

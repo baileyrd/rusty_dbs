@@ -600,11 +600,43 @@ async fn connectors(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
         let runner = SubprocessRunner::new(&config);
         let service = BackupService::new(&mut storage, &config, &registry, &runner);
         let rows = service.list_connectors();
-        Ok(serde_json::to_value(rows).unwrap_or(Value::Null))
+        let mut value = serde_json::to_value(rows).unwrap_or(Value::Null);
+        if let Some(list) = value.as_array_mut() {
+            for row in list {
+                annotate_install_requirements(row, &registry);
+            }
+        }
+        Ok(value)
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok(Json(result))
+}
+
+/// Adds `install_requirements` (the labels of what the Install button
+/// would run: pip packages, plus `chromium` for Playwright) and
+/// `needs_install` to one `/api/connectors` row, from the connector's
+/// declared handshake. Without this the UI had no way to tell a
+/// connector with nothing to install (Pinboard, Raindrop, ...) from one
+/// that needs Python packages, so it offered Install on every one.
+/// This says what is *declared*, not whether it is already installed:
+/// checking that would mean spawning Python per connector on every list.
+fn annotate_install_requirements(row: &mut Value, registry: &dbs_core::ConnectorRegistry) {
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+    let Some(type_) = obj.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let mut requirements: Vec<String> = Vec::new();
+    if let Some(rc) = registry.get(type_) {
+        requirements.extend(rc.handshake.pip_requirements.iter().cloned());
+        if rc.handshake.needs_playwright_browser {
+            requirements.push("chromium (Playwright)".to_string());
+        }
+    }
+    obj.insert("needs_install".to_string(), json!(!requirements.is_empty()));
+    obj.insert("install_requirements".to_string(), json!(requirements));
 }
 
 /// `GET /api/sources` — every configured source, `name`/`type`/
@@ -763,7 +795,9 @@ fn allowed_secret_keys(
 /// `in_env_file`/`in_process_env`/`sources`, matching `loadSecrets`'s
 /// (`app.js`) per-row rendering exactly); `allowed`: every secret key
 /// any *registered* connector declares, configured or not — the wider
-/// list `loadSecrets`' "Set another key" picker draws from. `env_file`
+/// list `loadSecrets`' "Set another key" picker draws from. `saved`: the
+/// subset of `allowed` that already has a value (`.env` or process env),
+/// used by the Add-source flow before any source needs the key. `env_file`
 /// is the `.env` path being read/written, shown as-is in the UI.
 /// `unresolved_source_types` is every distinct `type` a configured
 /// source names that no discovered connector answers to — an empty
@@ -818,10 +852,20 @@ async fn secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError>
             })
             .collect();
 
+        // Every allowed key that already has a value, whether or not a
+        // configured source uses it yet. The Add-source flow needs this
+        // to show "already saved" for a key the user set before creating
+        // its source — `secrets` alone only covers keys in use.
+        let saved: Vec<&String> = allowed
+            .iter()
+            .filter(|key| in_env_file.contains(*key) || std::env::var(key).is_ok())
+            .collect();
+
         Ok(json!({
             "env_file": dbs_core::display_path(&env_path),
             "secrets": secrets,
             "allowed": allowed,
+            "saved": saved,
             "unresolved_source_types": unresolved_types,
         }))
     })
@@ -1917,4 +1961,75 @@ async fn research_report(
         report,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbs_core::{Capabilities, ConnectorRegistry, Handshake, RegisteredConnector};
+
+    fn fake_rc(type_: &str, pip: &[&str], playwright: bool) -> RegisteredConnector {
+        RegisteredConnector {
+            type_: type_.to_string(),
+            plugin_id: format!("{type_}:{type_}"),
+            dist_name: type_.to_string(),
+            is_builtin: true,
+            command: std::path::PathBuf::from("unused"),
+            args: Vec::new(),
+            handshake: Handshake {
+                type_: type_.to_string(),
+                core_api_version: 1,
+                schema_version: 1,
+                capabilities: Capabilities::default(),
+                secret_keys: vec![],
+                item_kinds: vec!["item".to_string()],
+                display_name: None,
+                description: None,
+                export_profile: None,
+                auth_capture: None,
+                volatile_fields: Vec::new(),
+                pip_requirements: pip.iter().map(|s| s.to_string()).collect(),
+                needs_playwright_browser: playwright,
+                config_schema: Value::Null,
+            },
+        }
+    }
+
+    #[test]
+    fn a_token_only_connector_needs_no_install() {
+        let registry = ConnectorRegistry::from_resolved([fake_rc("pinboard", &[], false)]);
+        let mut row = json!({"type": "pinboard"});
+        annotate_install_requirements(&mut row, &registry);
+        assert_eq!(row["needs_install"], false);
+        assert_eq!(row["install_requirements"], json!([]));
+    }
+
+    #[test]
+    fn pip_packages_and_playwright_are_listed_in_install_order() {
+        let registry =
+            ConnectorRegistry::from_resolved([fake_rc("skool", &["playwright", "yt-dlp"], true)]);
+        let mut row = json!({"type": "skool"});
+        annotate_install_requirements(&mut row, &registry);
+        assert_eq!(row["needs_install"], true);
+        assert_eq!(
+            row["install_requirements"],
+            json!(["playwright", "yt-dlp", "chromium (Playwright)"])
+        );
+    }
+
+    #[test]
+    fn a_row_for_an_unknown_type_is_marked_as_needing_nothing() {
+        let registry = ConnectorRegistry::new();
+        let mut row = json!({"type": "ghost"});
+        annotate_install_requirements(&mut row, &registry);
+        assert_eq!(row["needs_install"], false);
+    }
+
+    #[test]
+    fn a_malformed_row_is_left_untouched() {
+        let registry = ConnectorRegistry::new();
+        let mut row = json!(["not", "an", "object"]);
+        annotate_install_requirements(&mut row, &registry);
+        assert_eq!(row, json!(["not", "an", "object"]));
+    }
 }
