@@ -33,11 +33,38 @@ in its own commit.
   `YOUTUBE_COOKIES_FILE` and `GITHUB_TOKEN` keys stay declared, because
   `fetch` validates `video_cookies_file_env` against them; removing them
   belongs with the download work.
-- **Flaky `dbs serve` startup tests.** These failed in CI on two of the
-  last three runs ("never accepted a connection") and passed on re-run.
-  All three startup waits now use one 30-second `STARTUP_TIMEOUT`. Each
-  wait returns as soon as the server is ready, so this only matters on
-  a slow runner.
+- **Every command opened the database relative to the working
+  directory.** The flaky `dbs serve` tests ("never accepted a
+  connection") weren't slow: raising the wait from 5s to 30s changed
+  nothing. Once the tests captured the server's stderr (see below), CI
+  showed `storage error: failed to set journal_mode: database is locked`.
+  Every command (24 in `dbs-cli`, `dbs-web`'s `open_storage`, and the
+  doctor's WAL check) opened the raw `database` string. So a relative
+  `database = "dbs.sqlite3"` resolved against the *working directory*,
+  and the parallel test servers, each with its own config, all opened one
+  shared file. Outside tests, `dbs --config other/dir/dbs.toml ...` run
+  from elsewhere silently used a database in the working directory.
+  `Config::database_path()` already resolved against the config's
+  directory, as documented and as `export_dir`/`download_root` do, but
+  nothing called it. The new `Config::database_location()` (which keeps
+  `:memory:` as is) is now used everywhere. A CLI test that runs
+  `dbs init` from a different directory fails on the old code.
+  - **Who this affects:** only someone with a relative `database` who runs
+    `dbs` from a directory other than the config's. Their database is now
+    the one next to the config, as documented. Running from the config's
+    directory (the usual case) is unchanged.
+- **The `serve` tests now explain failures.** A `Server` helper captures
+  the server's stderr and fails at once with its exit status and message
+  if the process exits, instead of retrying for the full timeout. The
+  30-second wait stays.
+- **"Text file busy" when starting yt-dlp.** Once YouTube's
+  discovery-failure test asserted that its fake really ran, it failed
+  intermittently on Linux CI. A fake script written and executed at once
+  can hit `ETXTBSY` if another test thread forks while the file is open.
+  `dbs_connector_support::spawn_retrying_busy` retries for up to about
+  1s on that error only, and the YouTube, Vimeo and Udemy yt-dlp
+  launches use it. This also covers the same race right after yt-dlp
+  updates itself.
 - **Fragile tests.**
   - YouTube's discovery-failure test used a `#!/bin/sh` fake without
     `#[cfg(unix)]`. On Windows the fake couldn't launch, which also
@@ -51,7 +78,10 @@ in its own commit.
 - Spotify incremental runs re-reading every liked track.
 - Skool claiming to download videos and resources, and installing
   download-only tools.
-- Intermittent CI failures in the `dbs serve` startup tests.
+- A relative `database` path resolved against the working directory
+  instead of the config file's directory. This also caused the
+  intermittent `dbs serve` test failures.
+- Intermittent "text file busy" failures starting a just-written yt-dlp.
 
 ### Security
 - None.
