@@ -595,7 +595,7 @@ fn run_yt_dlp_download(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
-    let mut child = match cmd.spawn() {
+    let mut child = match dbs_connector_support::spawn_retrying_busy(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("udemy: failed to launch yt-dlp for {url}: {e}");

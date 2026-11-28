@@ -427,7 +427,7 @@ fn download_video(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
-    let mut child = match cmd.spawn() {
+    let mut child = match dbs_connector_support::spawn_retrying_busy(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("vimeo: video download failed ({dest_name}): {e}");

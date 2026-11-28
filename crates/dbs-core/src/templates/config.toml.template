@@ -67,46 +67,15 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # cookies_file_env = "YOUTUBE_COOKIES_FILE"
 # # cookies_from_browser = "chrome"
 
-# Skool: back up your communities/courses/lessons via a logged-in browser
-# session. Needs Python with Playwright + Chromium, yt-dlp, nodejs-wheel and
-# ffmpeg-downloader: click Install on the Connectors page (`dbs serve
-# --allow-setup`) to install them all. Click "Skool login" in the UI to capture the session
-# (SKOOL_SESSION_DIR). Resource files + lesson videos are saved under
-# <download_root>/<source-name> (download_videos, on by default; yt-dlp +
-# auto-managed ffmpeg); set downloads_dir to override the location.
+# Skool: catalog your communities, courses and lessons (titles and structure)
+# via a logged-in browser session. Needs Python with Playwright + Chromium:
+# click Install on the Connectors page (`dbs serve --allow-setup`). Click
+# "Skool login" in the UI to capture the session (SKOOL_SESSION_DIR).
+# Lesson videos and resource files are NOT downloaded yet: download_videos,
+# video_* and downloads_dir are reserved for that and currently have no effect.
 # [sources.skool]
 # type = "skool"
 # enabled = true
-# downloads_dir = "~/skool-backup"   # optional; default <download_root>/<source-name>
-# download_videos = true             # set false for catalog/resources only
-# video_quality = 1080               # cap the HLS variant height; 0 = best
-# write_markdown = true              # a url2obs-style .md note of each lesson page
-# video_cookies_file_env = "YOUTUBE_COOKIES_FILE"  # cookies for EXTERNAL videos
-#   (a lesson's YouTube/Vimeo/Loom link) — reuses the youtube connector's secret
-#   if you already have one; needed when yt-dlp reports "Sign in to confirm
-#   you're not a bot". video_cookies_from_browser = "chrome" is a fallback for
-#   when no cookie file is set — on Windows it often fails ("Failed to
-#   decrypt with DPAPI") against modern Chrome, so prefer the captured file.
-#   "Sign in to confirm you're not a bot" with VALID cookies almost always
-#   means yt-dlp couldn't run its JS challenge solver — this needs the
-#   nodejs-wheel package (no system Node install; click Install on the
-#   Connectors page again, or `pip install nodejs-wheel`, to pick it up).
-#   video_extractor_args pins yt-dlp to specific player client(s), e.g.
-#   { youtube = { player_client = ["web_embedded"] } } — leave this UNSET
-#   unless you've confirmed yt-dlp's own default multi-client fallback fails
-#   too. Confirmed live to be a real footgun: pinning to one client can
-#   PREVENT yt-dlp from ever trying another (e.g. android_vr) that would have
-#   worked — check the `skool: downloading ...` log line's extractor_args
-#   field and try removing this setting entirely before adding it.
-# video_extractor_args = { }         # only set after ruling out the default fallback
-#   Still stuck with cookies, a resolved js_runtimes path, AND no
-#   extractor_args restriction (check the `skool: downloading ...` log line
-#   for all three)? video_debug = true forwards yt-dlp's full diagnostic
-#   chain (which player client was tried, whether the JS solver actually
-#   ran) into the log instead of just the final error — see WHY rather than
-#   guess again. A persistent block after that likely needs a PO token
-#   provider plugin — see yt-dlp's PO Token Guide.
-# video_debug = false                # verbose yt-dlp diagnostics for a stubborn video
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion

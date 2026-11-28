@@ -1502,7 +1502,7 @@ impl<'a> BackupService<'a> {
             detail: integrity,
         });
 
-        let wal_path = format!("{}-wal", self.config.database);
+        let wal_path = format!("{}-wal", self.config.database_location());
         let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
         const WAL_WARN_BYTES: u64 = 10_000_000;
         checks.push(DoctorCheck {

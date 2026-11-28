@@ -157,13 +157,13 @@ impl SkoolConnector {
                 },
             ],
             volatile_fields: vec!["updatedAt".to_string()],
-            pip_requirements: vec![
-                "playwright>=1.40".to_string(),
-                "yt-dlp[default,curl-cffi]>=2026.1.29".to_string(),
-                "nodejs-wheel>=22".to_string(),
-                "ffmpeg-downloader>=0.5".to_string(),
-            ],
-            runtime_imports: vec!["playwright".to_string(), "yt_dlp".to_string()],
+            // Catalog-only (see the module docs): a run drives Chromium
+            // through Playwright and nothing else. yt-dlp, nodejs-wheel and
+            // ffmpeg-downloader belong to the not-yet-ported download
+            // pipeline; installing them now would only cost the user a
+            // large, unused install. Add them back with that pipeline.
+            pip_requirements: vec!["playwright>=1.40".to_string()],
+            runtime_imports: vec!["playwright".to_string()],
             auth_capture: AuthCapture {
                 kind: "browser_session".to_string(),
                 secret_key: "SKOOL_SESSION_DIR".to_string(),
@@ -1052,8 +1052,8 @@ impl Connector for SkoolConnector {
 
     fn setup_hint(&self) -> &str {
         "Click 'Skool login' to capture a session: a browser opens, you log in, and you CLOSE \
-         the window to finish. Resource files are saved under <download_root>/<source-name> \
-         unless downloads_dir overrides it."
+         the window to finish. Backups catalog your communities, courses and lessons (titles \
+         and structure); lesson videos and resource files are not downloaded yet."
     }
 
     fn secret_keys(&self) -> &[String] {
@@ -1124,7 +1124,7 @@ impl Connector for SkoolConnector {
                     "type": "array",
                     "items": {"type": "string"},
                     "default": [],
-                    "description": "Communities to catalog only (metadata, no downloads), by title or slug."
+                    "description": "Communities to catalog only, by title or slug. Every community is catalog-only for now: lesson videos and resource files are not downloaded yet."
                 }
             }
         })
@@ -1864,6 +1864,21 @@ mod tests {
         let capture = connector.auth_capture().unwrap();
         assert_eq!(capture.kind, "browser_session");
         assert_eq!(capture.secret_key, "SKOOL_SESSION_DIR");
+    }
+
+    /// Until the download pipeline is ported, Skool must not claim to
+    /// download anything or make users install download-only tools.
+    #[test]
+    fn a_catalog_only_connector_neither_promises_nor_installs_downloads() {
+        let connector = SkoolConnector::new(SkoolConfig::default());
+        assert_eq!(
+            connector.pip_requirements(),
+            ["playwright>=1.40".to_string()]
+        );
+        assert_eq!(connector.runtime_imports(), ["playwright".to_string()]);
+        let hint = connector.setup_hint();
+        assert!(hint.contains("not downloaded yet"), "{hint}");
+        assert!(!hint.contains("are saved under"), "{hint}");
     }
 
     #[test]

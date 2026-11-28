@@ -163,6 +163,23 @@ impl Config {
         self.resolve(&self.database)
     }
 
+    /// The database to open: `database` resolved against the config
+    /// file's directory (like every other path here), or SQLite's
+    /// `:memory:` unchanged.
+    ///
+    /// Every command used to open the raw `database` string, so a
+    /// relative path landed in the *current working directory* instead.
+    /// Running `dbs -c other/dir/dbs.toml ...` from elsewhere used the
+    /// wrong database, and parallel test servers that each had their own
+    /// config all opened one shared file and failed with "database is
+    /// locked".
+    pub fn database_location(&self) -> String {
+        if self.database == ":memory:" {
+            return self.database.clone();
+        }
+        self.database_path().to_string_lossy().into_owned()
+    }
+
     pub fn export_path(&self) -> PathBuf {
         self.resolve(&self.export_dir)
     }
@@ -570,6 +587,52 @@ mod tests {
 
     fn write_temp_toml(contents: &str) -> TempFile {
         TempFile::new(contents)
+    }
+
+    /// A real loaded config whose file lives in its own temp directory.
+    fn config_in_temp_dir(label: &str) -> (Config, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "rusty_dbs_db_location_{label}_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dbs.toml");
+        std::fs::write(
+            &path,
+            "[dbs]
+database = \"dbs.sqlite3\"
+",
+        )
+        .unwrap();
+        (load_config(&path).unwrap(), dir)
+    }
+
+    #[test]
+    fn database_location_resolves_a_relative_path_against_the_config_dir() {
+        let (config, dir) = config_in_temp_dir("relative");
+        let location = PathBuf::from(config.database_location());
+        // `base_dir` is canonicalized, so on Windows it carries the
+        // `\\?\` verbatim prefix internally; compare both forms.
+        assert_eq!(location, config.base_dir.join("dbs.sqlite3"));
+        assert_eq!(
+            PathBuf::from(display_path(&location)),
+            dir.join("dbs.sqlite3")
+        );
+    }
+
+    #[test]
+    fn database_location_keeps_an_absolute_path() {
+        let (mut config, _dir) = config_in_temp_dir("absolute");
+        let absolute = std::env::temp_dir().join("abs.sqlite3");
+        config.database = absolute.to_string_lossy().into_owned();
+        assert_eq!(PathBuf::from(config.database_location()), absolute);
+    }
+
+    #[test]
+    fn database_location_keeps_in_memory() {
+        let (mut config, _dir) = config_in_temp_dir("memory");
+        config.database = ":memory:".to_string();
+        assert_eq!(config.database_location(), ":memory:");
     }
 
     #[test]

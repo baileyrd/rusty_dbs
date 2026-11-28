@@ -273,11 +273,19 @@ impl SpotifyConnector {
 
     /// Fetches one page of playlists, queueing its items and its
     /// checkpoint. Returns `Ok(true)` if another page follows.
+    ///
+    /// The checkpoint carries `cursor` (the tracks phase's state,
+    /// including `tracks_high_watermark`) unchanged. The host *replaces*
+    /// the stored cursor at every checkpoint, so these used to send `{}`,
+    /// which wiped the watermark at the end of every run and made each
+    /// incremental run re-read all liked tracks.
+    #[allow(clippy::too_many_arguments)]
     fn playlists_page(
         &self,
         http: &RefCell<ManagedHttpClient>,
         token: &str,
         paging: &mut Paging,
+        cursor: &serde_json::Map<String, Value>,
         live_ids: &mut HashSet<String>,
         out: &mut EventQueue,
     ) -> Result<bool, ConnectorError> {
@@ -301,7 +309,7 @@ impl SpotifyConnector {
         }
         out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
             cursor: Cursor {
-                value: Value::Object(serde_json::Map::new()),
+                value: Value::Object(cursor.clone()),
             },
             note: format!("playlists page {}", paging.page),
         })));
@@ -672,7 +680,14 @@ impl Connector for SpotifyConnector {
                     }
                 }
                 Stage::Playlists(mut paging) => {
-                    match this.playlists_page(http, &token, &mut paging, &mut live_ids, out) {
+                    match this.playlists_page(
+                        http,
+                        &token,
+                        &mut paging,
+                        &cursor,
+                        &mut live_ids,
+                        out,
+                    ) {
                         Ok(true) => {
                             stage = Stage::Playlists(paging);
                             Step::More
@@ -1095,6 +1110,69 @@ mod tests {
             .collect();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].external_id(), "track:new");
+    }
+
+    /// Regression: the host replaces the stored cursor at every
+    /// checkpoint, and playlist checkpoints used to carry `{}`, so a run
+    /// with playlists on always ended with an empty cursor. The tracks
+    /// watermark was lost and every incremental run re-read all liked
+    /// tracks. The LAST checkpoint of the run must keep the watermark.
+    #[test]
+    fn the_runs_last_checkpoint_keeps_the_tracks_watermark() {
+        let mut server = mockito::Server::new();
+        let _m_token = server
+            .mock("POST", "/api/token")
+            .with_status(200)
+            .with_body(token_body())
+            .create();
+        let tracks = page(
+            vec![track_entry(
+                "new",
+                "New Song",
+                "Artist",
+                "2024-06-01T00:00:00Z",
+            )],
+            None,
+        );
+        let _m_tracks = server
+            .mock("GET", mockito::Matcher::Regex(r"^/me/tracks.*".to_string()))
+            .with_status(200)
+            .with_body(tracks.to_string())
+            .create();
+        let playlists = page(vec![playlist_entry("pl1", "Mix")], None);
+        let _m_playlists = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/me/playlists.*".to_string()),
+            )
+            .with_status(200)
+            .with_body(playlists.to_string())
+            .create();
+
+        let mut connector = SpotifyConnector::new(SpotifyConfig::default())
+            .with_api_base(server.url())
+            .with_token_url(format!("{}/api/token", server.url()));
+        let ctx = ctx_with(
+            "incremental",
+            Some(serde_json::json!({"tracks_high_watermark": "2024-03-01T00:00:00Z"})),
+            no_sleep_client(),
+            Some(("id", "secret", "refresh")),
+        );
+        let evs = events(connector.fetch(&ctx));
+
+        let last = evs
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                FetchEvent::Checkpoint(cp) => Some(cp),
+                _ => None,
+            })
+            .expect("a run ends with a checkpoint");
+        assert!(last.note.starts_with("playlists page"), "{}", last.note);
+        assert_eq!(
+            last.cursor.value["tracks_high_watermark"], "2024-06-01T00:00:00Z",
+            "the newest liked-track time must survive the playlists phase"
+        );
     }
 
     #[test]

@@ -188,8 +188,7 @@ impl YouTubeConnector {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd
-            .spawn()
+        let child = dbs_connector_support::spawn_retrying_busy(&mut cmd)
             .map_err(|e| format!("failed to launch yt-dlp: {e}"))?;
         let timeout = Duration::from_secs(self.config.extract_timeout);
         let result =
@@ -795,6 +794,8 @@ mod tests {
         dir
     }
 
+    // `#!/bin/sh` only: every Windows test uses a `.cmd` fake instead.
+    #[cfg(not(windows))]
     fn write_fake_yt_dlp(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -988,18 +989,51 @@ exit 0"#,
         assert_eq!(items.len(), 1, "{evs:?}");
     }
 
+    /// A fake `yt-dlp` whose playlist-discovery call fails (touching
+    /// `marker` first, so a test can prove the fake really ran) and whose
+    /// other calls return an empty list. A `.cmd` on Windows and a
+    /// `#!/bin/sh` script elsewhere.
+    fn failing_discovery_fake_yt_dlp(dir: &Path, marker: &Path) -> std::path::PathBuf {
+        let marker = marker.display();
+        #[cfg(windows)]
+        {
+            let path = dir.join("fake-yt-dlp.cmd");
+            let body = format!(
+                "@echo off
+                 echo %* | findstr /C:\"feed/playlists\" >nul
+                 if not errorlevel 1 (
+                 echo called> \"{marker}\"
+                 echo boom 1>&2
+                 exit /b 1
+                 )
+                 echo {{\"entries\":[]}}
+"
+            );
+            std::fs::write(&path, body).unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            write_fake_yt_dlp(
+                dir,
+                "fake-yt-dlp.sh",
+                &format!(
+                    r#"case "$*" in
+  *"feed/playlists"*) touch "{marker}"; echo "boom" >&2; exit 1 ;;
+  *) echo '{{"entries":[]}}' ;;
+esac
+exit 0"#
+                ),
+            )
+        }
+    }
+
     #[test]
     fn playlist_discovery_failure_marks_playlists_as_failed_without_aborting() {
         let dir = temp_dir("discovery-failed");
-        let fake = write_fake_yt_dlp(
-            &dir,
-            "fake-yt-dlp.sh",
-            r#"case "$*" in
-  *"feed/playlists"*) echo "boom" >&2; exit 1 ;;
-  *) echo '{"entries":[]}' ;;
-esac
-exit 0"#,
-        );
+        let marker = dir.join("discovery-called");
+        let _ = std::fs::remove_file(&marker);
+        let fake = failing_discovery_fake_yt_dlp(&dir, &marker);
         let config = YouTubeConfig {
             watch_later: false,
             liked: false,
@@ -1014,6 +1048,13 @@ exit 0"#,
         assert!(!evs
             .iter()
             .any(|e| matches!(e, FetchEvent::ReconcileMarker(_))));
+        // The fake really ran and failed discovery. Before, on Windows the
+        // `#!/bin/sh` fake couldn't launch at all, which also looks like a
+        // discovery failure, so the test passed without testing anything.
+        assert!(
+            marker.exists(),
+            "the fake yt-dlp's discovery call never ran"
+        );
     }
 
     // Unix-only: relies on the `#!/bin/sh` fake yt-dlp script above.

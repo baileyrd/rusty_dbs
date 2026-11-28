@@ -83,6 +83,14 @@ yet, so everything so far is under Unreleased.
   defaults instead of requiring hand-written JSON in the Advanced textarea.
 
 ### Fixed
+- A relative `database` path in `dbs.toml` now resolves against the
+  config file's directory, as documented, instead of the directory you
+  run `dbs` from. Running from the config's directory is unchanged.
+- Spotify no longer re-reads every liked track on each incremental run.
+  The playlists phase was wiping the saved position.
+- Skool no longer claims to download lesson videos and resource files,
+  which aren't implemented yet, and no longer installs download-only
+  tools.
 - Backups now save as they go instead of collecting everything first.
   This covers Raindrop, Bluesky, GitHub, Mastodon, Readwise, Spotify,
   Vimeo, Udemy, Podcast, YouTube and Reddit; video and audio downloads

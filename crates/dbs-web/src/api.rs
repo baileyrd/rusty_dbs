@@ -91,7 +91,7 @@ impl From<DbsError> for ApiError {
 /// already treats storage: cheap to open, no long-lived lock a slow
 /// request could hold across others.
 pub(crate) fn open_storage(config: &dbs_core::Config) -> Result<SqliteStorage, DbsError> {
-    let mut storage = SqliteStorage::open(&config.database)?;
+    let mut storage = SqliteStorage::open(&config.database_location())?;
     storage.migrate()?;
     Ok(storage)
 }
