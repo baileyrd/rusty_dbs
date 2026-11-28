@@ -55,7 +55,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-use dbs_connector_support::{find_python, run_python_script_using};
+use dbs_connector_support::{find_python, run_python_script_using, step_fetch, EventQueue, Step};
 use dbs_core::export_profile::ExportProfile;
 use dbs_core::parse_iso;
 use dbs_core::{
@@ -805,18 +805,80 @@ impl Connector for RedditConnector {
             return Box::new(out.into_iter());
         }
 
-        let acquired = match acquire(
-            &session_dir,
+        self.fetch_with_acquire(ctx, session_dir, acquire)
+    }
+}
+
+/// Where [`RedditConnector::fetch_with_acquire`] is in a run.
+enum Stage {
+    /// The saved feed hasn't been acquired yet.
+    Acquire(String),
+    /// Mapping the acquired children, one per step.
+    Children(ChildrenState),
+    Done,
+}
+
+/// Progress through the acquired saved feed.
+struct ChildrenState {
+    acquired: AcquireOutput,
+    next: usize,
+    extracted_at: String,
+    live_ids: HashSet<String>,
+    seen: u32,
+}
+
+impl RedditConnector {
+    /// Everything [`Connector::fetch`] does after its setup checks,
+    /// with acquisition injectable so tests can stand in for the
+    /// Playwright script.
+    ///
+    /// Lazy: the first step runs the (single) acquisition; each later
+    /// step maps one saved child, which may fetch its outbound link, so
+    /// every item reaches the host before the next link is requested.
+    fn fetch_with_acquire<'a>(
+        &'a self,
+        ctx: &'a RunContext,
+        session_dir: String,
+        acquire: impl Fn(&str, bool, u32, f64) -> Result<AcquireOutput, ConnectorError> + 'a,
+    ) -> Box<dyn Iterator<Item = Result<FetchEvent, ConnectorError>> + 'a> {
+        let mut stage = Stage::Acquire(session_dir);
+        step_fetch(
+            move |out| match std::mem::replace(&mut stage, Stage::Done) {
+                Stage::Acquire(session_dir) => match self.acquire_feed(&session_dir, &acquire) {
+                    Ok(state) => {
+                        stage = Stage::Children(state);
+                        Step::More
+                    }
+                    Err(e) => {
+                        out.push_back(Err(e));
+                        Step::Done
+                    }
+                },
+                Stage::Children(mut state) => {
+                    if self.child_step(ctx, &mut state, out) {
+                        stage = Stage::Children(state);
+                        Step::More
+                    } else {
+                        Step::Done
+                    }
+                }
+                Stage::Done => Step::Done,
+            },
+        )
+    }
+
+    /// Runs the acquisition and sets up the per-child state.
+    fn acquire_feed(
+        &self,
+        session_dir: &str,
+        acquire: &impl Fn(&str, bool, u32, f64) -> Result<AcquireOutput, ConnectorError>,
+    ) -> Result<ChildrenState, ConnectorError> {
+        let acquired = acquire(
+            session_dir,
             self.config.headless,
             self.config.max_pages,
             self.config.delay,
-        ) {
-            Ok(a) => a,
-            Err(e) => {
-                out.push(Err(e));
-                return Box::new(out.into_iter());
-            }
-        };
+        )?;
         if let Some(username) = &self.config.username {
             if !username.eq_ignore_ascii_case(&acquired.account) {
                 eprintln!(
@@ -827,57 +889,78 @@ impl Connector for RedditConnector {
                 );
             }
         }
+        Ok(ChildrenState {
+            acquired,
+            next: 0,
+            extracted_at: dbs_core::iso_z(chrono::Utc::now()),
+            live_ids: HashSet::new(),
+            seen: 0,
+        })
+    }
 
-        let extracted_at = dbs_core::iso_z(chrono::Utc::now());
-        let mut live_ids: HashSet<String> = HashSet::new();
-        let mut seen: u32 = 0;
-        for child in &acquired.children {
-            let Some(raw) = record_from_child(child, &extracted_at) else {
-                continue;
-            };
-            let Some(item) = to_item(&self.config, ctx.http.as_ref(), ctx.store_media, &raw) else {
-                continue;
-            };
-            // Still record the id so the reconcile sweep never deletes
-            // an item that exists upstream but is merely out of
-            // current `include_types` scope.
-            live_ids.insert(item.external_id().to_string());
-            if !self.config.include_types.is_empty()
-                && !self.config.include_types.contains(&item.item_kind)
-            {
-                continue;
-            }
-            out.push(Ok(FetchEvent::Item(item)));
-            seen += 1;
-            if self.config.checkpoint_every > 0 && seen.is_multiple_of(self.config.checkpoint_every)
-            {
-                out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                    cursor: Cursor {
-                        value: serde_json::json!({"items_seen": seen}),
-                    },
-                    note: format!("after {seen} items"),
-                })));
-            }
+    /// Maps the next saved child, queueing its item (and a checkpoint
+    /// every `checkpoint_every` items). Once every child is done, queues
+    /// the final checkpoint and the reconcile marker and returns `false`.
+    fn child_step(
+        &self,
+        ctx: &RunContext,
+        state: &mut ChildrenState,
+        out: &mut EventQueue,
+    ) -> bool {
+        let Some(child) = state.acquired.children.get(state.next) else {
+            self.finish(state, out);
+            return false;
+        };
+        state.next += 1;
+        let Some(raw) = record_from_child(child, &state.extracted_at) else {
+            return true;
+        };
+        let Some(item) = to_item(&self.config, ctx.http.as_ref(), ctx.store_media, &raw) else {
+            return true;
+        };
+        // Still record the id so the reconcile sweep never deletes
+        // an item that exists upstream but is merely out of
+        // current `include_types` scope.
+        state.live_ids.insert(item.external_id().to_string());
+        if !self.config.include_types.is_empty()
+            && !self.config.include_types.contains(&item.item_kind)
+        {
+            return true;
         }
-        if acquired.children.is_empty() {
+        out.push_back(Ok(FetchEvent::Item(item)));
+        state.seen += 1;
+        if self.config.checkpoint_every > 0
+            && state.seen.is_multiple_of(self.config.checkpoint_every)
+        {
+            out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+                cursor: Cursor {
+                    value: serde_json::json!({"items_seen": state.seen}),
+                },
+                note: format!("after {} items", state.seen),
+            })));
+        }
+        true
+    }
+
+    /// Queues the run's final checkpoint and reconcile marker.
+    fn finish(&self, state: &mut ChildrenState, out: &mut EventQueue) {
+        if state.acquired.children.is_empty() {
             eprintln!(
                 "reddit: authenticated as u/{} but the saved feed returned 0 items — either \
                  nothing is saved on this account, or Reddit served an empty listing.",
-                acquired.account
+                state.acquired.account
             );
         }
 
-        out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
             cursor: Cursor {
-                value: serde_json::json!({"items_seen": seen}),
+                value: serde_json::json!({"items_seen": state.seen}),
             },
             note: "final".to_string(),
         })));
-        out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
-            live_ids,
+        out.push_back(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
+            std::mem::take(&mut state.live_ids),
         ))));
-
-        Box::new(out.into_iter())
     }
 }
 
@@ -1017,6 +1100,129 @@ mod tests {
         let result: Vec<_> = connector.fetch(&ctx).collect();
         assert_eq!(result.len(), 1, "{result:?}");
         assert!(result[0].is_err(), "{result:?}");
+    }
+
+    fn fake_acquire(
+        children: Vec<Value>,
+    ) -> impl Fn(&str, bool, u32, f64) -> Result<AcquireOutput, ConnectorError> {
+        move |_, _, _, _| {
+            Ok(AcquireOutput {
+                account: "me".to_string(),
+                children: children.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn fetch_with_acquire_yields_items_checkpoints_and_a_marker_covering_filtered_ids() {
+        let connector = RedditConnector::new(RedditConfig {
+            include_types: vec!["post".to_string()],
+            checkpoint_every: 2,
+            ..Default::default()
+        });
+        let ctx = ctx_with(no_sleep_client(), None, false);
+        let children = vec![
+            post_child("t3_a", "A", "/r/rust/a/", "https://example.com/a", ""),
+            comment_child("t1_c", "filtered out"),
+            post_child("t3_b", "B", "/r/rust/b/", "https://example.com/b", ""),
+            serde_json::json!({"kind": "t3", "data": {}}), // no fullname: skipped
+            post_child("t3_d", "D", "/r/rust/d/", "https://example.com/d", ""),
+        ];
+        let evs: Vec<FetchEvent> = connector
+            .fetch_with_acquire(&ctx, String::new(), fake_acquire(children))
+            .map(|r| r.unwrap())
+            .collect();
+        let shape: Vec<String> = evs
+            .iter()
+            .map(|e| match e {
+                FetchEvent::Item(i) => format!("item {}", i.external_id()),
+                FetchEvent::Checkpoint(cp) => format!("checkpoint {} {}", cp.note, cp.cursor.value),
+                FetchEvent::ReconcileMarker(m) => {
+                    let mut ids: Vec<_> = m.live_ids.iter().cloned().collect();
+                    ids.sort();
+                    format!("marker {}", ids.join(","))
+                }
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                "item t3_a",
+                "item t3_b",
+                r#"checkpoint after 2 items {"items_seen":2}"#,
+                "item t3_d",
+                r#"checkpoint final {"items_seen":3}"#,
+                "marker t1_c,t3_a,t3_b,t3_d",
+            ]
+        );
+    }
+
+    #[test]
+    fn fetch_with_acquire_propagates_an_acquisition_error_alone() {
+        let connector = RedditConnector::new(RedditConfig::default());
+        let ctx = ctx_with(no_sleep_client(), None, false);
+        let result: Vec<_> = connector
+            .fetch_with_acquire(&ctx, String::new(), |_, _, _, _| {
+                Err(ConnectorError::Auth("logged out".to_string()))
+            })
+            .collect();
+        assert_eq!(result.len(), 1, "{result:?}");
+        assert!(matches!(result[0], Err(ConnectorError::Auth(_))));
+    }
+
+    #[test]
+    fn fetch_archives_the_next_outbound_link_only_after_the_previous_item_is_consumed() {
+        let mut server = mockito::Server::new();
+        let first = server
+            .mock("GET", "/first")
+            .with_status(200)
+            .with_body("one")
+            .expect(1)
+            .create();
+        let second = server
+            .mock("GET", "/second")
+            .with_status(200)
+            .with_body("two")
+            .expect(1)
+            .create();
+        let connector = RedditConnector::new(RedditConfig {
+            archive_outbound_link: true,
+            ..Default::default()
+        });
+        let ctx = ctx_with(no_sleep_client(), None, true);
+        let children = vec![
+            post_child(
+                "t3_a",
+                "A",
+                "/r/rust/a/",
+                &format!("{}/first", server.url()),
+                "",
+            ),
+            post_child(
+                "t3_b",
+                "B",
+                "/r/rust/b/",
+                &format!("{}/second", server.url()),
+                "",
+            ),
+        ];
+        let mut iter = connector.fetch_with_acquire(&ctx, String::new(), fake_acquire(children));
+
+        match iter.next() {
+            Some(Ok(FetchEvent::Item(i))) => assert_eq!(i.external_id(), "t3_a"),
+            other => panic!("expected the first post, got {other:?}"),
+        }
+        first.assert();
+        assert!(
+            !second.matched(),
+            "the second outbound link was fetched before the first item was consumed"
+        );
+
+        let rest: Vec<_> = iter.map(|r| r.unwrap()).collect();
+        second.assert();
+        assert!(rest
+            .iter()
+            .any(|e| matches!(e, FetchEvent::ReconcileMarker(_))));
     }
 
     // -- acquire_using: exercised against a fake stub "interpreter"

@@ -8,6 +8,131 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Backups save as they go and show live progress
+**2026-11-27**
+
+A first (full) Raindrop backup of a 53,152-bookmark library took about
+10 minutes and looked stuck the whole time. The run showed "0 fetched",
+the progress bar sat at 0%, and nothing was saved until it finished.
+There were three causes:
+
+1. **The connector buffered everything.** `RaindropConnector::fetch`
+   requested every page into one `Vec` and only returned an iterator
+   over it at the end. The subprocess protocol and the host's run loop
+   already streamed and committed at each checkpoint, but they got
+   nothing to work with until the last page had been fetched.
+2. **No mid-run progress was reported.** `BackupService` emitted
+   `SourceStart` and `SourceDone` only. `ProgressPhase::Checkpoint` was
+   reserved for this but never sent, because the runner wasn't given the
+   progress sink.
+3. **The UI's single-source bar was a fixed 0%** until the source
+   finished. That's the right fraction, but it looks frozen.
+
+**Fixes:**
+- **Lazy connector:** Raindrop's `fetch` now returns a lazy
+  `RaindropFetch` iterator. It requests page N+1 only after page N's
+  items and checkpoint have been consumed, so the host commits each page
+  as it arrives. The paging logic is unchanged (early stop, reconcile
+  marker, include_types scoping, Trash polling): it is the same code run
+  one page at a time. A failed page still ends the run after the pages
+  already saved, with no reconcile marker, so a partial listing can't
+  drive a deletion sweep.
+- **Progress events:** `ConnectorRunner` gains
+  `run_connector_with_progress`, whose default ignores progress, so
+  other runners are unaffected. `SubprocessRunner` implements it, and
+  the service now calls it. A new
+  `run_connector_subprocess_with_progress` emits a
+  `ProgressPhase::Checkpoint` event after every mid-run commit (each
+  connector checkpoint and each `batch_max` flush). Each event carries
+  running fetched/created/updated/unchanged/deleted counts and the
+  checkpoint note, such as "collection page 248".
+  `run_connector_subprocess` keeps its signature as a wrapper.
+- **UI:** the backup panel now shows:
+  - an elapsed-time clock that ticks every second, taken from the job's
+    own start time so it survives a page reload;
+  - "waiting for the first page…" until data arrives;
+  - "last update Ns ago" after a 15-second gap between pages;
+  - the current page note;
+  - a moving bar instead of a static 0%.
+
+  When the run ends it shows "done in Xm Ys".
+
+Verified against a real Raindrop account: an incremental run now
+streams `collection page 0`, `trash page 0` and `trash page 1` checkpoint
+events about 0.2s apart, where before only start and done arrived. The
+panel was checked in headless Edge with a simulated running job: the
+clock advanced, the page note rendered, and there were no console errors.
+
+**Every connector with something to stream now does.** A shared helper,
+`dbs_connector_support::step_fetch`, turns a connector's paging loop into
+a lazy iterator. The connector supplies a step that does one unit of
+work and queues its events; the next step runs only after those events
+have been consumed. Raindrop uses it too. Units by connector:
+
+| Connector | One step |
+|---|---|
+| Raindrop, Bluesky, GitHub, Mastodon, Readwise, Spotify | one API page |
+| Vimeo | one API page, or one video including its yt-dlp download |
+| Udemy | the course list; then one course's curriculum; then one lecture including its video download |
+| Podcast | one feed, or one episode including its audio download |
+| YouTube | one list's yt-dlp listing (or the playlist-discovery call) |
+| Reddit | the single acquisition, then one saved item including its outbound-link archive |
+
+**Rule for every conversion:** the events each connector sends are
+exactly the same as before: the same items, the same checkpoints with
+the same cursors, and the same reconcile marker under the same
+conditions. Only when the work happens changed. No checkpoints were
+added, because a new mid-run cursor could run ahead of data not yet
+fetched and make a failed run skip items for good. Connectors with a
+single checkpoint at the end still benefit, because the host commits
+every `batch_max` items. Each crate's existing tests pass unchanged,
+which shows its event sequence didn't change. Each has a new test that
+fails if `fetch` is made eager again.
+
+**Left eager, on purpose:**
+- Pinboard (`posts/all` returns everything in one response) and Pocket
+  Casts (two list calls): there is nothing to stream.
+- Skool: two up-front acquisition calls, then in-memory parsing. Its
+  download code is not reachable from `fetch` in this catalog-only
+  version.
+
+**Found along the way, not changed here:**
+- **Spotify:** playlist-page checkpoints carry an empty cursor, and the
+  host replaces the stored cursor at each checkpoint. Each run therefore
+  ends with `{}`, losing `tracks_high_watermark`, so every incremental
+  run re-reads all liked tracks. No data is lost, but requests are
+  wasted.
+- **Skool:** the config template and Add-source form offer
+  `download_videos` and related options that `fetch` doesn't act on yet.
+- **YouTube:** `playlist_discovery_failure_marks_playlists_as_failed_without_aborting`
+  uses a `/bin/sh` fake but isn't `#[cfg(unix)]`. On Windows it passes
+  only because launching the fake fails.
+- **GitHub:** a test's page mocks (`page=1`) also match `per_page=100`,
+  so it depends on mockito's match order.
+
+### Fixed
+- A large backup looked stuck and saved nothing until it finished.
+  This affected Raindrop and 10 other connectors.
+- Backups reported no progress between start and finish.
+
+### Added
+- `ConnectorRunner::run_connector_with_progress` and
+  `run_connector_subprocess_with_progress`.
+- `dbs_connector_support::{step_fetch, EventQueue, Step}`, with 4 tests.
+- Tests:
+  - Each of the 11 converted connectors doesn't start its next unit of
+    work before the previous one's events are consumed. Each test was
+    checked to fail on the old buffering code.
+  - A failed page ends the run without a reconcile marker.
+  - Checkpoint progress is emitted with running counts (2, 4, 5 for
+    5 items at `batch_max = 2`).
+  - The plain runner entry point is unchanged.
+
+### Security
+- None.
+
+---
+
 ## Web UI source edits take effect without restarting `dbs serve`
 **2026-11-27**
 

@@ -52,14 +52,14 @@
 //! `dbs-research`'s YouTube search already uses.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dbs_connector_support::{run_with_watchdog, WatchdogError};
+use dbs_connector_support::{run_with_watchdog, step_fetch, Step, WatchdogError};
 use dbs_core::export_profile::ExportProfile;
 use dbs_core::parse_iso;
 use dbs_core::{
@@ -197,6 +197,21 @@ impl VimeoConnector {
     /// a local `MediaRef` (in place of the watch-link reference). A
     /// failure is logged and retried next run — it never fails the
     /// backup or the other videos.
+    /// Maps one `/me/videos` entry to its item, downloading the video
+    /// first when `downloads` is set. `None` for an entry with no usable
+    /// id (skipped, as before).
+    fn video_item(&self, downloads: Option<&Path>, raw: &Value) -> Option<BackupItem> {
+        let vid = video_id(raw.get("uri").and_then(|v| v.as_str()))?;
+        // Download BEFORE mapping so the on-disk path is baked into the
+        // item's media (raw is copied into BackupItem.raw, so a later
+        // mutation wouldn't reach the stored item).
+        let mut raw = raw.clone();
+        if let Some(downloads) = downloads {
+            self.maybe_download(downloads, &vid, &mut raw);
+        }
+        to_item(&raw)
+    }
+
     fn maybe_download(&self, downloads: &Path, vid: &str, raw: &mut Value) {
         let Some(link) = raw
             .get("link")
@@ -722,68 +737,101 @@ impl Connector for VimeoConnector {
             None
         };
 
+        let this = &*self;
         let mut live_ids = HashSet::new();
         let mut seen = 0u32;
-        let mut page = 1u32;
-        loop {
-            let data = match self.get_page(http, &token, page) {
-                Ok(d) => d,
-                Err(e) => {
-                    out.push(Err(e));
-                    return Box::new(out.into_iter());
-                }
-            };
-            let entries = data
-                .get("data")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if entries.is_empty() {
-                break;
-            }
-            for raw in &entries {
-                let Some(vid) = video_id(raw.get("uri").and_then(|v| v.as_str())) else {
-                    continue;
-                };
-                // Download BEFORE mapping so the on-disk path is baked
-                // into the item's media (raw is copied into
-                // BackupItem.raw, so a later mutation wouldn't reach
-                // the stored item).
-                let mut raw = raw.clone();
-                if let Some(downloads) = &downloads {
-                    self.maybe_download(downloads, &vid, &mut raw);
-                }
-                let Some(item) = to_item(&raw) else {
-                    continue;
-                };
-                live_ids.insert(item.external_id().to_string());
-                out.push(Ok(FetchEvent::Item(item)));
-                seen += 1;
-            }
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: serde_json::json!({"videos_seen": seen}),
-                },
-                note: format!("page {page}"),
-            })));
-            // Stop when Vimeo reports no next page, or the page came
-            // back short.
-            let has_next = data
-                .get("paging")
-                .and_then(|p| p.get("next"))
-                .is_some_and(|v| !v.is_null());
-            if !has_next || (entries.len() as u32) < self.config.page_size {
-                break;
-            }
-            page += 1;
-        }
+        let mut stage = Stage::Page(1);
 
-        out.push(Ok(FetchEvent::ReconcileMarker(
-            dbs_core::ReconcileMarker::new(live_ids),
-        )));
-
-        Box::new(out.into_iter())
+        // One step = one API page request, or one video from the current
+        // page (including its optional yt-dlp download). Each video's item
+        // reaches the host before the next download starts, and each page's
+        // checkpoint follows its last video exactly as before.
+        step_fetch(
+            move |out| match std::mem::replace(&mut stage, Stage::Done) {
+                Stage::Page(page) => {
+                    let data = match this.get_page(http, &token, page) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            // An error ends the run with no reconcile marker.
+                            out.push_back(Err(e));
+                            return Step::Done;
+                        }
+                    };
+                    let entries = data
+                        .get("data")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    if entries.is_empty() {
+                        out.push_back(Ok(FetchEvent::ReconcileMarker(
+                            dbs_core::ReconcileMarker::new(std::mem::take(&mut live_ids)),
+                        )));
+                        return Step::Done;
+                    }
+                    // Stop after this page when Vimeo reports no next
+                    // page, or the page came back short.
+                    let has_next = data
+                        .get("paging")
+                        .and_then(|p| p.get("next"))
+                        .is_some_and(|v| !v.is_null());
+                    let last = !has_next || (entries.len() as u32) < this.config.page_size;
+                    stage = Stage::Entries {
+                        page,
+                        entries: entries.into(),
+                        last,
+                    };
+                    Step::More
+                }
+                Stage::Entries {
+                    page,
+                    mut entries,
+                    last,
+                } => {
+                    if let Some(raw) = entries.pop_front() {
+                        if let Some(item) = this.video_item(downloads.as_deref(), &raw) {
+                            live_ids.insert(item.external_id().to_string());
+                            out.push_back(Ok(FetchEvent::Item(item)));
+                            seen += 1;
+                        }
+                        stage = Stage::Entries {
+                            page,
+                            entries,
+                            last,
+                        };
+                        return Step::More;
+                    }
+                    out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+                        cursor: Cursor {
+                            value: serde_json::json!({"videos_seen": seen}),
+                        },
+                        note: format!("page {page}"),
+                    })));
+                    if last {
+                        out.push_back(Ok(FetchEvent::ReconcileMarker(
+                            dbs_core::ReconcileMarker::new(std::mem::take(&mut live_ids)),
+                        )));
+                        return Step::Done;
+                    }
+                    stage = Stage::Page(page + 1);
+                    Step::More
+                }
+                Stage::Done => Step::Done,
+            },
+        )
     }
+}
+
+/// Where a fetch is in its run.
+enum Stage {
+    /// Request this page number next.
+    Page(u32),
+    /// Videos of `page` not yet processed; `last` = no page follows it.
+    Entries {
+        page: u32,
+        entries: VecDeque<Value>,
+        last: bool,
+    },
+    Done,
 }
 
 #[cfg(test)]
@@ -985,6 +1033,67 @@ mod tests {
             })
             .collect();
         assert_eq!(items.len(), 2, "{evs:?}");
+    }
+
+    /// A long run (many pages, optional per-video downloads) must hand
+    /// each page's videos and checkpoint to the host before the next page
+    /// is requested, instead of collecting the whole library first.
+    #[test]
+    fn fetch_yields_each_page_before_requesting_the_next() {
+        let mut server = mockito::Server::new();
+        let page1 = page(
+            vec![video_json("1", "First", "https://vimeo.com/1")],
+            Some("/me/videos?page=2"),
+        );
+        let page2 = page(vec![video_json("2", "Second", "https://vimeo.com/2")], None);
+        let m1 = server
+            .mock("GET", "/me/videos")
+            .match_query(mockito::Matcher::Regex(r"(^|&)page=1(&|$)".to_string()))
+            .with_status(200)
+            .with_body(page1.to_string())
+            .expect(1)
+            .create();
+        let m2 = server
+            .mock("GET", "/me/videos")
+            .match_query(mockito::Matcher::Regex(r"(^|&)page=2(&|$)".to_string()))
+            .with_status(200)
+            .with_body(page2.to_string())
+            .expect(1)
+            .create();
+
+        let config = VimeoConfig {
+            page_size: 1,
+            ..Default::default()
+        };
+        let mut connector = VimeoConnector::new(config).with_base_url(server.url());
+        let ctx = ctx_with(no_sleep_client(), Some("tok"), None);
+        let mut iter = connector.fetch(&ctx);
+
+        // Page 1: its video, then its checkpoint.
+        match iter.next().unwrap().unwrap() {
+            FetchEvent::Item(i) => assert_eq!(i.external_id(), "1"),
+            other => panic!("expected video 1, got {other:?}"),
+        }
+        match iter.next().unwrap().unwrap() {
+            FetchEvent::Checkpoint(cp) => assert_eq!(cp.note, "page 1"),
+            other => panic!("expected page 1's checkpoint, got {other:?}"),
+        }
+        m1.assert();
+        assert!(
+            !m2.matched(),
+            "page 2 was requested before page 1 was consumed"
+        );
+
+        // Draining fetches page 2 exactly once and still ends with the
+        // reconcile marker covering both pages.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m2.assert();
+        match rest.last() {
+            Some(FetchEvent::ReconcileMarker(m)) => {
+                assert!(m.live_ids.contains("1") && m.live_ids.contains("2"));
+            }
+            other => panic!("expected a final reconcile marker, got {other:?}"),
+        }
     }
 
     #[test]

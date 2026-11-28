@@ -29,6 +29,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+use dbs_connector_support::{step_fetch, EventQueue, Step};
 use dbs_core::parse_iso;
 use dbs_core::{
     BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor, FetchEvent, ItemKind,
@@ -127,74 +128,96 @@ impl MastodonConnector {
         Ok((statuses, next))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn fetch_kind(
+    /// Fetches one page of `state`'s listing and queues its statuses,
+    /// then a checkpoint. Returns whether another page should be
+    /// fetched (`state.url` then holds its URL).
+    ///
+    /// Called once per page by `fetch`'s [`step_fetch`] step, so each
+    /// page reaches the host before the next request is made.
+    fn kind_page(
         &self,
         http: &RefCell<ManagedHttpClient>,
         token: &str,
         base: &str,
-        endpoint: &str,
-        kind: &str,
+        state: &mut KindState,
         live_ids: &mut HashSet<String>,
-        out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-    ) {
-        let mut url = Some(format!("{base}/api/v1/{endpoint}"));
-        let mut page = 1u32;
-        let mut first = true;
-
-        while let Some(u) = url.take() {
-            let params = [("limit", self.config.page_size.to_string())];
-            let (statuses, next) =
-                match self.get_page(http, &u, token, first.then_some(&params[..])) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        out.push(Err(e));
-                        return;
-                    }
-                };
-            first = false;
-            for status in &statuses {
-                let Some(id) = status_id(status) else {
-                    continue;
-                };
-                let item = to_item(kind, status, &id);
-                live_ids.insert(item.external_id().to_string());
-                out.push(Ok(FetchEvent::Item(item)));
-            }
-            // Pagination markers are internal ids surfaced only via
-            // the Link header — no cursor of our own to persist since
-            // every run walks the full listing from scratch.
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(serde_json::Map::new()),
-                },
-                note: format!("{endpoint} page {page}"),
-            })));
-            url = if statuses.is_empty() {
-                None
-            } else {
-                match next {
-                    // get_page reattaches the bearer token to whatever
-                    // `url` becomes on the next request -- a Link header
-                    // pointing at a different origin than the configured
-                    // instance (a malicious/compromised instance, since
-                    // `instance` is itself arbitrary user-supplied input)
-                    // would otherwise exfiltrate MASTODON_TOKEN there.
-                    Some(n) if same_origin(base, &n) => Some(n),
-                    Some(n) => {
-                        out.push(Err(ConnectorError::Transient(format!(
-                            "mastodon: refusing to follow a pagination Link header \
-                             pointing at a different origin than the configured \
-                             instance: {n}"
-                        ))));
-                        return;
-                    }
-                    None => None,
-                }
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
+        let params = [("limit", self.config.page_size.to_string())];
+        let first = state.page == 1;
+        let (statuses, next) =
+            self.get_page(http, &state.url, token, first.then_some(&params[..]))?;
+        for status in &statuses {
+            let Some(id) = status_id(status) else {
+                continue;
             };
-            page += 1;
+            let item = to_item(state.kind, status, &id);
+            live_ids.insert(item.external_id().to_string());
+            out.push_back(Ok(FetchEvent::Item(item)));
+        }
+        // Pagination markers are internal ids surfaced only via
+        // the Link header — no cursor of our own to persist since
+        // every run walks the full listing from scratch.
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: Value::Object(serde_json::Map::new()),
+            },
+            note: format!("{} page {}", state.endpoint, state.page),
+        })));
+        if statuses.is_empty() {
+            return Ok(false);
+        }
+        match next {
+            // get_page reattaches the bearer token to whatever
+            // `url` becomes on the next request -- a Link header
+            // pointing at a different origin than the configured
+            // instance (a malicious/compromised instance, since
+            // `instance` is itself arbitrary user-supplied input)
+            // would otherwise exfiltrate MASTODON_TOKEN there.
+            Some(n) if same_origin(base, &n) => {
+                state.url = n;
+                state.page += 1;
+                Ok(true)
+            }
+            Some(n) => Err(ConnectorError::Transient(format!(
+                "mastodon: refusing to follow a pagination Link header \
+                 pointing at a different origin than the configured \
+                 instance: {n}"
+            ))),
+            None => Ok(false),
         }
     }
+}
+
+/// Paging state for one kind's listing (bookmarks or favourites).
+struct KindState {
+    /// API endpoint name, e.g. `bookmarks`; used in checkpoint notes.
+    endpoint: &'static str,
+    /// Item kind, e.g. `bookmark`.
+    kind: &'static str,
+    /// URL of the next page to fetch.
+    url: String,
+    /// 1-based page number; page 1 carries the `limit` query param.
+    page: u32,
+}
+
+impl KindState {
+    fn new(base: &str, endpoint: &'static str, kind: &'static str) -> Self {
+        Self {
+            endpoint,
+            kind,
+            url: format!("{base}/api/v1/{endpoint}"),
+            page: 1,
+        }
+    }
+}
+
+/// Where a fetch is in its run.
+enum Stage {
+    Kind(KindState),
+    /// Every enabled kind is done; queue the reconcile marker (if any).
+    Finish,
+    Done,
 }
 
 /// True iff `candidate` parses as a URL sharing `base`'s scheme, host,
@@ -427,37 +450,60 @@ impl Connector for MastodonConnector {
             }
         };
 
-        let mut live_ids = HashSet::new();
-        let kinds: [(bool, &str, &str); 2] = [
+        let kinds: [(bool, &'static str, &'static str); 2] = [
             (self.config.include_bookmarks, "bookmarks", "bookmark"),
             (self.config.include_favourites, "favourites", "favourite"),
         ];
-        let mut enabled_count = 0usize;
-        for (enabled, endpoint, kind) in kinds {
-            if !enabled {
-                continue;
-            }
-            enabled_count += 1;
-            self.fetch_kind(http, &token, &base, endpoint, kind, &mut live_ids, &mut out);
-            if matches!(out.last(), Some(Err(_))) {
-                return Box::new(out.into_iter());
-            }
-        }
+        let mut pending: std::collections::VecDeque<KindState> = kinds
+            .iter()
+            .filter(|(enabled, _, _)| *enabled)
+            .map(|&(_, endpoint, kind)| KindState::new(&base, endpoint, kind))
+            .collect();
+        let all_enabled = pending.len() == kinds.len();
+        let mut next_stage = move || pending.pop_front().map_or(Stage::Finish, Stage::Kind);
+        let mut stage = next_stage();
+        let mut live_ids = HashSet::new();
+        let this = &*self;
 
-        if enabled_count == kinds.len() {
-            out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
-                live_ids,
-            ))));
-        } else {
-            // A deliberately-partial enumeration must never offer the
-            // skipped kind's stored items up for the sweep. No logger
-            // equivalent exists in `RunContext` yet (same gap
-            // `github`'s (#86) doc-comment calls out) — stderr stands
-            // in.
-            eprintln!("mastodon: a kind is disabled — deletion detection skipped");
-        }
-
-        Box::new(out.into_iter())
+        // One step = one API page. Each page's items and checkpoint reach
+        // the host before the next page is requested. An error ends the
+        // run: nothing after it is fetched and no reconcile marker is sent.
+        step_fetch(
+            move |out| match std::mem::replace(&mut stage, Stage::Done) {
+                Stage::Kind(mut st) => {
+                    match this.kind_page(http, &token, &base, &mut st, &mut live_ids, out) {
+                        Ok(true) => {
+                            stage = Stage::Kind(st);
+                            Step::More
+                        }
+                        Ok(false) => {
+                            stage = next_stage();
+                            Step::More
+                        }
+                        Err(e) => {
+                            out.push_back(Err(e));
+                            Step::Done
+                        }
+                    }
+                }
+                Stage::Finish => {
+                    if all_enabled {
+                        out.push_back(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
+                            std::mem::take(&mut live_ids),
+                        ))));
+                    } else {
+                        // A deliberately-partial enumeration must never offer the
+                        // skipped kind's stored items up for the sweep. No logger
+                        // equivalent exists in `RunContext` yet (same gap
+                        // `github`'s (#86) doc-comment calls out) — stderr stands
+                        // in.
+                        eprintln!("mastodon: a kind is disabled — deletion detection skipped");
+                    }
+                    Step::Done
+                }
+                Stage::Done => Step::Done,
+            },
+        )
     }
 }
 
@@ -707,6 +753,63 @@ mod tests {
         assert_eq!(items.len(), 2, "{evs:?}");
         assert_eq!(items[0].external_id(), "bookmark:1");
         assert_eq!(items[1].external_id(), "bookmark:2");
+    }
+
+    /// Page N+1 must not be requested until page N's events, ending in
+    /// its checkpoint, have been handed to the caller.
+    #[test]
+    fn fetch_yields_each_page_before_requesting_the_next() {
+        let mut server = mockito::Server::new();
+        let next_url = format!("{}/api/v1/bookmarks?max_id=abc", server.url());
+        let page0 = serde_json::json!([status_json("1", "alice", "p1", "2024-06-01T00:00:00Z")]);
+        let page1 = serde_json::json!([status_json("2", "alice", "p2", "2024-06-02T00:00:00Z")]);
+
+        let m0 = server
+            .mock("GET", "/api/v1/bookmarks")
+            .match_query(mockito::Matcher::Regex(r"limit=".to_string()))
+            .with_status(200)
+            .with_header("Link", &format!("<{next_url}>; rel=\"next\""))
+            .with_body(page0.to_string())
+            .expect(1)
+            .create();
+        let m1 = server
+            .mock("GET", "/api/v1/bookmarks")
+            .match_query(mockito::Matcher::Regex(r"max_id=abc".to_string()))
+            .with_status(200)
+            .with_body(page1.to_string())
+            .expect(1)
+            .create();
+
+        let config = MastodonConfig {
+            include_favourites: false,
+            ..config_for(&server.url())
+        };
+        let mut connector = MastodonConnector::new(config);
+        let ctx = ctx_with(no_sleep_client(), Some("tok"));
+        let mut iter = connector.fetch(&ctx);
+
+        // Page 1: one bookmark, then its checkpoint.
+        assert!(matches!(iter.next(), Some(Ok(FetchEvent::Item(_)))));
+        match iter.next() {
+            Some(Ok(FetchEvent::Checkpoint(cp))) => assert_eq!(cp.note, "bookmarks page 1"),
+            other => panic!("expected page 1's checkpoint, got {other:?}"),
+        }
+        m0.assert();
+        assert!(
+            !m1.matched(),
+            "page 2 was requested before page 1 was consumed"
+        );
+
+        // Draining fetches page 2 exactly once.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m1.assert();
+        match rest.as_slice() {
+            [FetchEvent::Item(item), FetchEvent::Checkpoint(cp)] => {
+                assert_eq!(item.external_id(), "bookmark:2");
+                assert_eq!(cp.note, "bookmarks page 2");
+            }
+            other => panic!("expected page 2's item and checkpoint, got {other:?}"),
+        }
     }
 
     #[test]

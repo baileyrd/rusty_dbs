@@ -39,6 +39,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use dbs_connector_support::{step_fetch, Step};
 use dbs_core::export_profile::ExportProfile;
 use dbs_core::parse_iso;
 use dbs_core::{
@@ -581,61 +582,101 @@ impl Connector for PodcastConnector {
             }
         };
 
-        let mut failures = Vec::new();
+        let mut feeds = feeds.into_iter();
+        let mut failures: Vec<String> = Vec::new();
         let mut done = 0usize;
-        for feed_url in &feeds {
-            match self.fetch_feed(http, feed_url) {
-                Ok((show_title, episodes)) => {
-                    let episodes: Vec<Episode> = if self.config.max_episodes_per_feed > 0 {
-                        episodes
-                            .into_iter()
-                            .take(self.config.max_episodes_per_feed as usize)
-                            .collect()
-                    } else {
-                        episodes
+        let mut stage = Stage::NextFeed;
+        let this = &*self;
+
+        // One step = one feed request, or one episode (which may download
+        // its audio). Each episode reaches the host before the next one's
+        // download starts, and each feed's checkpoint before the next feed
+        // is requested.
+        step_fetch(
+            move |out| match std::mem::replace(&mut stage, Stage::NextFeed) {
+                Stage::NextFeed => {
+                    let Some(feed_url) = feeds.next() else {
+                        if !failures.is_empty() && done == 0 {
+                            out.push_back(Err(ConnectorError::Transient(format!(
+                                "podcast: every feed failed ({}): {}",
+                                failures.len(),
+                                failures.join(", ")
+                            ))));
+                        }
+                        return Step::Done;
                     };
-                    let ns = feed_ns(feed_url);
-                    for ep in &episodes {
-                        let Some(item) = self.to_item(
-                            http,
-                            ctx.download_dir.as_ref(),
-                            feed_url,
-                            &ns,
-                            show_title.as_deref(),
-                            ep,
-                        ) else {
-                            continue;
-                        };
-                        out.push(Ok(FetchEvent::Item(item)));
+                    match this.fetch_feed(http, &feed_url) {
+                        Ok((show_title, episodes)) => {
+                            let episodes: Vec<Episode> = if this.config.max_episodes_per_feed > 0 {
+                                episodes
+                                    .into_iter()
+                                    .take(this.config.max_episodes_per_feed as usize)
+                                    .collect()
+                            } else {
+                                episodes
+                            };
+                            stage = Stage::Episodes(FeedWalk {
+                                ns: feed_ns(&feed_url),
+                                feed_url,
+                                show_title,
+                                episodes: episodes.into_iter(),
+                            });
+                        }
+                        // A broken feed is logged and skipped, never fatal on its own.
+                        Err(e) => {
+                            eprintln!("podcast: feed {feed_url} failed: {e}");
+                            failures.push(feed_url);
+                        }
                     }
-                    done += 1;
-                    out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                        cursor: Cursor {
-                            value: serde_json::json!({"feeds_done": done}),
-                        },
-                        note: format!(
-                            "after {}",
-                            show_title.as_deref().unwrap_or(feed_url.as_str())
-                        ),
-                    })));
+                    Step::More
                 }
-                Err(e) => {
-                    eprintln!("podcast: feed {feed_url} failed: {e}");
-                    failures.push(feed_url.clone());
+                Stage::Episodes(mut walk) => {
+                    let Some(ep) = walk.episodes.next() else {
+                        done += 1;
+                        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+                            cursor: Cursor {
+                                value: serde_json::json!({"feeds_done": done}),
+                            },
+                            note: format!(
+                                "after {}",
+                                walk.show_title.as_deref().unwrap_or(walk.feed_url.as_str())
+                            ),
+                        })));
+                        return Step::More;
+                    };
+                    if let Some(item) = this.to_item(
+                        http,
+                        ctx.download_dir.as_ref(),
+                        &walk.feed_url,
+                        &walk.ns,
+                        walk.show_title.as_deref(),
+                        &ep,
+                    ) {
+                        out.push_back(Ok(FetchEvent::Item(item)));
+                    }
+                    stage = Stage::Episodes(walk);
+                    Step::More
                 }
-            }
-        }
-
-        if !failures.is_empty() && done == 0 {
-            out.push(Err(ConnectorError::Transient(format!(
-                "podcast: every feed failed ({}): {}",
-                failures.len(),
-                failures.join(", ")
-            ))));
-        }
-
-        Box::new(out.into_iter())
+            },
+        )
     }
+}
+
+/// One fetched feed whose episodes are still being turned into items.
+struct FeedWalk {
+    feed_url: String,
+    ns: String,
+    show_title: Option<String>,
+    episodes: std::vec::IntoIter<Episode>,
+}
+
+/// Where a fetch is in its run.
+enum Stage {
+    /// Request the next feed, or finish if none remain.
+    NextFeed,
+    /// Turn the current feed's next episode into an item; once none
+    /// remain, checkpoint the feed.
+    Episodes(FeedWalk),
 }
 
 #[cfg(test)]
@@ -992,6 +1033,92 @@ mod tests {
         assert!(local_path.exists(), "{local_path:?} should exist");
         assert_eq!(std::fs::read(local_path).unwrap(), b"fake-audio-bytes");
         assert!(local_path.starts_with(&dir));
+    }
+
+    /// The fix for "a big first backup shows nothing and saves nothing
+    /// until it finishes": an episode's audio must not be downloaded, nor
+    /// the next feed requested, until the events before it have been
+    /// handed to the caller.
+    #[test]
+    fn fetch_yields_each_episode_and_feed_before_starting_the_next() {
+        let mut server = mockito::Server::new();
+        let two_episode_feed = RSS_FEED
+            .replace(
+                "https://example.com/ep1.mp3",
+                &format!("{}/ep1.mp3", server.url()),
+            )
+            .replace(
+                "</channel>",
+                &format!(
+                    r#"<item><guid>ep-2</guid><title>Episode Two</title>
+                       <enclosure url="{}/ep2.mp3" type="audio/mpeg"/></item></channel>"#,
+                    server.url()
+                ),
+            );
+        let m_feed1 = server
+            .mock("GET", "/feed1.xml")
+            .with_status(200)
+            .with_body(two_episode_feed)
+            .expect(1)
+            .create();
+        let m_ep1 = server
+            .mock("GET", "/ep1.mp3")
+            .with_status(200)
+            .with_body(b"audio-1".as_slice())
+            .expect(1)
+            .create();
+        let m_ep2 = server
+            .mock("GET", "/ep2.mp3")
+            .with_status(200)
+            .with_body(b"audio-2".as_slice())
+            .expect(1)
+            .create();
+        let m_feed2 = server
+            .mock("GET", "/feed2.xml")
+            .with_status(200)
+            .with_body(ATOM_FEED)
+            .expect(1)
+            .create();
+
+        let dir = temp_dir("lazy");
+        let mut connector = PodcastConnector::new(PodcastConfig {
+            feeds: vec![
+                format!("{}/feed1.xml", server.url()),
+                format!("{}/feed2.xml", server.url()),
+            ],
+            download_audio: true,
+            ..Default::default()
+        });
+        let ctx = ctx_with(no_sleep_client(), Some(dir));
+        let mut iter = connector.fetch(&ctx);
+
+        // Episode 1 arrives before episode 2's audio is downloaded.
+        assert!(matches!(iter.next(), Some(Ok(FetchEvent::Item(_)))));
+        m_feed1.assert();
+        m_ep1.assert();
+        assert!(
+            !m_ep2.matched(),
+            "episode 2 was downloaded before episode 1 was consumed"
+        );
+
+        // Episode 2, then feed 1's checkpoint, before feed 2 is requested.
+        assert!(matches!(iter.next(), Some(Ok(FetchEvent::Item(_)))));
+        m_ep2.assert();
+        match iter.next() {
+            Some(Ok(FetchEvent::Checkpoint(cp))) => assert_eq!(cp.note, "after A Show"),
+            other => panic!("expected feed 1's checkpoint, got {other:?}"),
+        }
+        assert!(
+            !m_feed2.matched(),
+            "feed 2 was requested before feed 1 was consumed"
+        );
+
+        // Draining the rest fetches feed 2 exactly once.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m_feed2.assert();
+        assert_eq!(rest.len(), 2, "{rest:?}");
+        assert!(matches!(rest[0], FetchEvent::Item(_)));
+        assert!(matches!(rest[1], FetchEvent::Checkpoint(_)));
     }
 
     #[test]

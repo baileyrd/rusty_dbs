@@ -32,6 +32,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+use dbs_connector_support::{step_fetch, EventQueue, Step};
 use dbs_core::parse_iso;
 use dbs_core::{
     BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor, FetchEvent, ItemKind,
@@ -122,24 +123,18 @@ impl ReadwiseConnector {
             .map_err(|e| ConnectorError::Transient(format!("invalid JSON response: {e}")))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn fetch_kind(
+    /// Prepares the paging walk for one kind, reading its watermark from
+    /// `cursor` as it stands when the kind starts.
+    fn start_kind(
         &self,
-        http: &RefCell<ManagedHttpClient>,
-        token: &str,
-        endpoint: &str,
-        kind: &str,
-        cursor_key: &str,
-        cursor: &mut serde_json::Map<String, Value>,
+        kind: KindSpec,
+        cursor: &serde_json::Map<String, Value>,
         full: bool,
-        live_ids: &mut HashSet<String>,
-        out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-    ) {
+    ) -> KindWalk {
         let watermark = cursor
-            .get(cursor_key)
+            .get(kind.cursor_key)
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut max_seen = watermark.clone();
         let mut params = vec![("page_size", self.config.page_size.to_string())];
         if !full {
             if let Some(since) = watermark.as_deref().and_then(|w| parse_iso(Some(w))) {
@@ -149,80 +144,122 @@ impl ReadwiseConnector {
                 ));
             }
         }
-
-        let mut url = format!("{}/{endpoint}/", self.base_url);
-        let mut page = 1u32;
-        loop {
-            let is_first = page == 1;
-            let payload = match self.get_json(http, &url, token, is_first.then_some(&params[..])) {
-                Ok(p) => p,
-                Err(e) => {
-                    out.push(Err(e));
-                    return;
-                }
-            };
-            let Some(results) = payload.get("results").and_then(|v| v.as_array()) else {
-                out.push(Err(ConnectorError::Transient(format!(
-                    "readwise: {endpoint} returned no results list"
-                ))));
-                return;
-            };
-            for rec in results {
-                let Some(id) = record_id(rec) else {
-                    continue;
-                };
-                let item = to_item(kind, rec, &id);
-                live_ids.insert(item.external_id().to_string());
-                let updated = rec
-                    .get("updated")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !updated.is_empty() && max_seen.as_deref().is_none_or(|m| updated.as_str() > m) {
-                    max_seen = Some(updated);
-                }
-                out.push(Ok(FetchEvent::Item(item)));
-            }
-            // Mid-phase checkpoints carry the OLD watermark: advancing
-            // it before the walk completes would let a crash skip the
-            // gap between the old mark and the last committed page
-            // forever.
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(cursor.clone()),
-                },
-                note: format!("{endpoint} page {page}"),
-            })));
-            match payload.get("next").and_then(|v| v.as_str()) {
-                Some(next) if !next.is_empty() => {
-                    // The Authorization header is reattached to whatever
-                    // `url` becomes on the next request (see get_json) --
-                    // a `next` pointing at a different origin than the
-                    // configured API host (a compromised/MITM'd response)
-                    // would otherwise exfiltrate READWISE_TOKEN there.
-                    if !same_origin(&self.base_url, next) {
-                        out.push(Err(ConnectorError::Transient(format!(
-                            "readwise: refusing to follow a pagination 'next' URL pointing \
-                             at a different origin than the configured API host: {next}"
-                        ))));
-                        return;
-                    }
-                    url = next.to_string();
-                    page += 1;
-                }
-                _ => break,
-            }
-        }
-        if let Some(seen) = max_seen {
-            cursor.insert(cursor_key.to_string(), Value::String(seen));
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(cursor.clone()),
-                },
-                note: format!("{endpoint} done"),
-            })));
+        KindWalk {
+            url: format!("{}/{}/", self.base_url, kind.endpoint),
+            kind,
+            page: 1,
+            max_seen: watermark,
+            params,
         }
     }
+
+    /// Fetches one page of `walk`'s kind, queueing its items and its
+    /// checkpoint. Returns `Ok(true)` if another page follows; on the last
+    /// page it also advances the kind's watermark and queues the kind's
+    /// closing checkpoint, then returns `Ok(false)`.
+    ///
+    /// Called once per page by `fetch`'s [`step_fetch`] step, so each page
+    /// reaches the host (and is committed) before the next is requested.
+    fn kind_page(
+        &self,
+        http: &RefCell<ManagedHttpClient>,
+        token: &str,
+        walk: &mut KindWalk,
+        cursor: &mut serde_json::Map<String, Value>,
+        live_ids: &mut HashSet<String>,
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
+        let endpoint = walk.kind.endpoint;
+        let is_first = walk.page == 1;
+        let payload =
+            self.get_json(http, &walk.url, token, is_first.then_some(&walk.params[..]))?;
+        let Some(results) = payload.get("results").and_then(|v| v.as_array()) else {
+            return Err(ConnectorError::Transient(format!(
+                "readwise: {endpoint} returned no results list"
+            )));
+        };
+        for rec in results {
+            let Some(id) = record_id(rec) else {
+                continue;
+            };
+            let item = to_item(walk.kind.kind, rec, &id);
+            live_ids.insert(item.external_id().to_string());
+            let updated = rec
+                .get("updated")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !updated.is_empty()
+                && walk
+                    .max_seen
+                    .as_deref()
+                    .is_none_or(|m| updated.as_str() > m)
+            {
+                walk.max_seen = Some(updated);
+            }
+            out.push_back(Ok(FetchEvent::Item(item)));
+        }
+        // Mid-phase checkpoints carry the OLD watermark: advancing
+        // it before the walk completes would let a crash skip the
+        // gap between the old mark and the last committed page
+        // forever.
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: Value::Object(cursor.clone()),
+            },
+            note: format!("{endpoint} page {}", walk.page),
+        })));
+        match payload.get("next").and_then(|v| v.as_str()) {
+            Some(next) if !next.is_empty() => {
+                // The Authorization header is reattached to whatever
+                // `url` becomes on the next request (see get_json) --
+                // a `next` pointing at a different origin than the
+                // configured API host (a compromised/MITM'd response)
+                // would otherwise exfiltrate READWISE_TOKEN there.
+                if !same_origin(&self.base_url, next) {
+                    return Err(ConnectorError::Transient(format!(
+                        "readwise: refusing to follow a pagination 'next' URL pointing \
+                         at a different origin than the configured API host: {next}"
+                    )));
+                }
+                walk.url = next.to_string();
+                walk.page += 1;
+                Ok(true)
+            }
+            _ => {
+                if let Some(seen) = walk.max_seen.take() {
+                    cursor.insert(walk.kind.cursor_key.to_string(), Value::String(seen));
+                    out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+                        cursor: Cursor {
+                            value: Value::Object(cursor.clone()),
+                        },
+                        note: format!("{endpoint} done"),
+                    })));
+                }
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// One Readwise record kind: its list endpoint, item kind, and the
+/// cursor key holding its watermark.
+#[derive(Debug, Clone, Copy)]
+struct KindSpec {
+    endpoint: &'static str,
+    kind: &'static str,
+    cursor_key: &'static str,
+}
+
+/// Paging state for one kind's walk, carried between `fetch` steps.
+struct KindWalk {
+    kind: KindSpec,
+    /// The next page's URL: the list endpoint, then the server's `next`.
+    url: String,
+    page: u32,
+    max_seen: Option<String>,
+    /// Query parameters, sent on the first page only (`next` carries its own).
+    params: Vec<(&'static str, String)>,
 }
 
 /// True iff `candidate` parses as a URL sharing `base`'s scheme, host,
@@ -494,58 +531,74 @@ impl Connector for ReadwiseConnector {
             .unwrap_or_default();
         let mut live_ids = HashSet::new();
 
-        let kinds: [(bool, &str, &str, &str); 2] = [
+        let kinds: [(bool, KindSpec); 2] = [
             (
                 self.config.include_books,
-                "books",
-                "book",
-                "books_high_watermark",
+                KindSpec {
+                    endpoint: "books",
+                    kind: "book",
+                    cursor_key: "books_high_watermark",
+                },
             ),
             (
                 self.config.include_highlights,
-                "highlights",
-                "highlight",
-                "highlights_high_watermark",
+                KindSpec {
+                    endpoint: "highlights",
+                    kind: "highlight",
+                    cursor_key: "highlights_high_watermark",
+                },
             ),
         ];
-        let mut enabled_count = 0usize;
-        for (enabled, endpoint, kind, cursor_key) in kinds {
-            if !enabled {
-                continue;
-            }
-            enabled_count += 1;
-            self.fetch_kind(
-                http,
-                &token,
-                endpoint,
-                kind,
-                cursor_key,
-                &mut cursor,
-                full,
-                &mut live_ids,
-                &mut out,
-            );
-            if matches!(out.last(), Some(Err(_))) {
-                return Box::new(out.into_iter());
-            }
-        }
+        let all_enabled = kinds.iter().all(|(enabled, _)| *enabled);
+        let mut pending = kinds
+            .into_iter()
+            .filter_map(|(enabled, spec)| enabled.then_some(spec));
+        let mut walk: Option<KindWalk> = None;
+        let this = &*self;
 
-        if full {
-            if enabled_count == kinds.len() {
-                out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
-                    live_ids,
-                ))));
-            } else {
-                // A deliberately-partial enumeration must never offer
-                // the skipped kind's stored items up for the sweep.
-                // No logger equivalent exists in `RunContext` yet
-                // (same gap `github`'s (#86) doc-comment calls out) —
-                // stderr stands in.
-                eprintln!("readwise: a kind is disabled — deletion detection skipped");
+        // One step = one page. Each page's items and checkpoint reach the
+        // host (and are committed) before the next page is requested.
+        step_fetch(move |out| {
+            let current = match walk.as_mut() {
+                Some(w) => w,
+                None => match pending.next() {
+                    Some(spec) => walk.insert(this.start_kind(spec, &cursor, full)),
+                    None => {
+                        // Every enabled kind finished without error.
+                        if full {
+                            if all_enabled {
+                                out.push_back(Ok(FetchEvent::ReconcileMarker(
+                                    ReconcileMarker::new(std::mem::take(&mut live_ids)),
+                                )));
+                            } else {
+                                // A deliberately-partial enumeration must never offer
+                                // the skipped kind's stored items up for the sweep.
+                                // No logger equivalent exists in `RunContext` yet
+                                // (same gap `github`'s (#86) doc-comment calls out) —
+                                // stderr stands in.
+                                eprintln!(
+                                    "readwise: a kind is disabled — deletion detection skipped"
+                                );
+                            }
+                        }
+                        return Step::Done;
+                    }
+                },
+            };
+            match this.kind_page(http, &token, current, &mut cursor, &mut live_ids, out) {
+                Ok(true) => Step::More,
+                Ok(false) => {
+                    walk = None;
+                    Step::More
+                }
+                // An error ends the run; nothing after it is fetched, and no
+                // reconcile marker is sent for a partial listing.
+                Err(e) => {
+                    out.push_back(Err(e));
+                    Step::Done
+                }
             }
-        }
-
-        Box::new(out.into_iter())
+        })
     }
 }
 
@@ -800,6 +853,63 @@ mod tests {
         assert_eq!(items.len(), 2, "{evs:?}");
         assert_eq!(items[0].external_id(), "book:1");
         assert_eq!(items[1].external_id(), "book:2");
+    }
+
+    /// The fix for "a big first backup shows nothing and saves nothing
+    /// until it finishes": page N+1 must not be requested until page N's
+    /// events, ending in its checkpoint, have been handed to the caller.
+    #[test]
+    fn fetch_yields_each_page_before_requesting_the_next() {
+        let mut server = mockito::Server::new();
+        let page1_next = format!("{}/books/?cursor=abc", server.url());
+        let page0 = page(
+            vec![book_json(1, "Book One", "2024-06-01T00:00:00Z")],
+            Some(&page1_next),
+        );
+        let page1 = page(vec![book_json(2, "Book Two", "2024-06-02T00:00:00Z")], None);
+        let m0 = server
+            .mock("GET", "/books/")
+            .match_query(mockito::Matcher::Regex(r"page_size=".to_string()))
+            .with_status(200)
+            .with_body(page0.to_string())
+            .expect(1)
+            .create();
+        let m1 = server
+            .mock("GET", "/books/")
+            .match_query(mockito::Matcher::Regex(r"cursor=abc".to_string()))
+            .with_status(200)
+            .with_body(page1.to_string())
+            .expect(1)
+            .create();
+
+        let config = ReadwiseConfig {
+            include_highlights: false,
+            ..Default::default()
+        };
+        let mut connector = ReadwiseConnector::new(config).with_base_url(server.url());
+        let ctx = ctx_with("full", None, no_sleep_client(), Some("tok"));
+        let mut iter = connector.fetch(&ctx);
+
+        // Page 1: one item, then its checkpoint.
+        assert!(matches!(iter.next(), Some(Ok(FetchEvent::Item(_)))));
+        match iter.next() {
+            Some(Ok(FetchEvent::Checkpoint(cp))) => assert_eq!(cp.note, "books page 1"),
+            other => panic!("expected page 1's checkpoint, got {other:?}"),
+        }
+        m0.assert();
+        assert!(
+            !m1.matched(),
+            "page 2 was requested before page 1 was consumed"
+        );
+
+        // Draining the rest fetches page 2 exactly once.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m1.assert();
+        assert!(matches!(&rest[0], FetchEvent::Item(i) if i.external_id() == "book:2"));
+        match rest.last() {
+            Some(FetchEvent::Checkpoint(cp)) => assert_eq!(cp.note, "books done"),
+            other => panic!("expected the closing checkpoint, got {other:?}"),
+        }
     }
 
     #[test]

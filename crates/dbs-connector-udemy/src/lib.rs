@@ -50,14 +50,14 @@
 //! is tested against a fake `yt-dlp` script on disk.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dbs_connector_support::{run_with_watchdog, WatchdogError};
+use dbs_connector_support::{run_with_watchdog, step_fetch, Step, WatchdogError};
 use dbs_core::{
     BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor, FetchEvent, ItemKind,
     ManagedHttpClient, MediaRef, ReconcileMarker, RunContext,
@@ -284,6 +284,31 @@ impl UdemyConnector {
             ),
             Some(&params),
         )
+    }
+
+    /// Maps one non-chapter curriculum entry to its item, downloading the
+    /// lecture video first when `download_videos` is on. `None` for an
+    /// entry with no usable id (skipped, as before).
+    fn lecture_item(
+        &self,
+        ctx: &RunContext,
+        course: &Value,
+        entry: &Value,
+        chapter_title: Option<&str>,
+    ) -> Option<BackupItem> {
+        let mut lecture = curriculum_item(course, entry, chapter_title, &self.base_url)?;
+        if self.config.download_videos && is_video(entry) {
+            if let Some(local) = self.maybe_download_video(ctx, course, entry) {
+                lecture.media.push(MediaRef {
+                    url: local.to_string_lossy().to_string(),
+                    kind: "video".to_string(),
+                    filename: local.file_name().map(|n| n.to_string_lossy().to_string()),
+                    mime: None,
+                    data: None,
+                });
+            }
+        }
+        Some(lecture)
     }
 
     /// Download one lecture video; idempotent and best-effort.
@@ -859,87 +884,123 @@ impl Connector for UdemyConnector {
             }
         };
 
-        let courses = match self.list_courses(http, &token) {
-            Ok(c) => c,
-            Err(e) => {
-                out.push(Err(e));
-                return Box::new(out.into_iter());
-            }
-        };
-
+        let this = &*self;
         let mut live_ids = HashSet::new();
         let mut partial = false;
         let mut done = 0u32;
-        for course in &courses {
-            let Some(item) = course_item(course, &self.base_url) else {
-                continue;
-            };
-            live_ids.insert(item.external_id().to_string());
-            let course_id = item.external_id().trim_start_matches("course:").to_string();
-            out.push(Ok(FetchEvent::Item(item)));
+        let mut stage = Stage::ListCourses;
 
-            let entries = match self.list_curriculum(http, &token, &course_id) {
-                Ok(e) => e,
-                Err(e) => {
-                    // One inaccessible course must not lose the rest
-                    // of the run — but reconciling against a walk
-                    // that's missing its lectures would falsely sweep
-                    // them, so the marker below is withheld.
-                    eprintln!(
-                        "udemy: curriculum for course {course_id} failed ({e}) — partial \
-                         enumeration, deletion detection skipped this run"
-                    );
-                    partial = true;
-                    continue;
-                }
-            };
-
-            let mut chapter_title: Option<String> = None;
-            for entry in &entries {
-                if entry.get("_class").and_then(|v| v.as_str()) == Some("chapter") {
-                    chapter_title = entry
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    continue;
-                }
-                let Some(mut lecture) =
-                    curriculum_item(course, entry, chapter_title.as_deref(), &self.base_url)
-                else {
-                    continue;
-                };
-                if self.config.download_videos && is_video(entry) {
-                    if let Some(local) = self.maybe_download_video(ctx, course, entry) {
-                        lecture.media.push(MediaRef {
-                            url: local.to_string_lossy().to_string(),
-                            kind: "video".to_string(),
-                            filename: local.file_name().map(|n| n.to_string_lossy().to_string()),
-                            mime: None,
-                            data: None,
-                        });
+        // Steps: list every enrolled course (all pages, before any event,
+        // so a listing failure still yields only the error), then one
+        // course at a time (its item + curriculum request), then one
+        // curriculum entry at a time (including its optional yt-dlp
+        // download). Each lecture reaches the host before the next
+        // download starts.
+        step_fetch(
+            move |out| match std::mem::replace(&mut stage, Stage::Done) {
+                Stage::ListCourses => match this.list_courses(http, &token) {
+                    Ok(courses) => {
+                        stage = Stage::NextCourse(courses.into());
+                        Step::More
                     }
-                }
-                live_ids.insert(lecture.external_id().to_string());
-                out.push(Ok(FetchEvent::Item(lecture)));
-            }
-
-            done += 1;
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: serde_json::json!({"courses_done": done}),
+                    Err(e) => {
+                        out.push_back(Err(e));
+                        Step::Done
+                    }
                 },
-                note: format!("after course {course_id}"),
-            })));
-        }
+                Stage::NextCourse(mut courses) => {
+                    let Some(course) = courses.pop_front() else {
+                        if !partial {
+                            out.push_back(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
+                                std::mem::take(&mut live_ids),
+                            ))));
+                        }
+                        return Step::Done;
+                    };
+                    let Some(item) = course_item(&course, &this.base_url) else {
+                        stage = Stage::NextCourse(courses);
+                        return Step::More;
+                    };
+                    live_ids.insert(item.external_id().to_string());
+                    let course_id = item.external_id().trim_start_matches("course:").to_string();
+                    out.push_back(Ok(FetchEvent::Item(item)));
 
-        if !partial {
-            out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
-                live_ids,
-            ))));
-        }
-
-        Box::new(out.into_iter())
+                    match this.list_curriculum(http, &token, &course_id) {
+                        Ok(entries) => {
+                            stage = Stage::Entries(CourseWalk {
+                                courses,
+                                course,
+                                course_id,
+                                entries: entries.into(),
+                                chapter_title: None,
+                            });
+                        }
+                        Err(e) => {
+                            // One inaccessible course must not lose the rest
+                            // of the run — but reconciling against a walk
+                            // that's missing its lectures would falsely sweep
+                            // them, so the marker is withheld.
+                            eprintln!(
+                                "udemy: curriculum for course {course_id} failed ({e}) — partial \
+                                 enumeration, deletion detection skipped this run"
+                            );
+                            partial = true;
+                            stage = Stage::NextCourse(courses);
+                        }
+                    }
+                    Step::More
+                }
+                Stage::Entries(mut walk) => {
+                    let Some(entry) = walk.entries.pop_front() else {
+                        done += 1;
+                        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+                            cursor: Cursor {
+                                value: serde_json::json!({"courses_done": done}),
+                            },
+                            note: format!("after course {}", walk.course_id),
+                        })));
+                        stage = Stage::NextCourse(walk.courses);
+                        return Step::More;
+                    };
+                    if entry.get("_class").and_then(|v| v.as_str()) == Some("chapter") {
+                        walk.chapter_title = entry
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                    } else if let Some(lecture) =
+                        this.lecture_item(ctx, &walk.course, &entry, walk.chapter_title.as_deref())
+                    {
+                        live_ids.insert(lecture.external_id().to_string());
+                        out.push_back(Ok(FetchEvent::Item(lecture)));
+                    }
+                    stage = Stage::Entries(walk);
+                    Step::More
+                }
+                Stage::Done => Step::Done,
+            },
+        )
     }
+}
+
+/// One course's curriculum walk in progress.
+struct CourseWalk {
+    /// Courses still to walk after this one.
+    courses: VecDeque<Value>,
+    course: Value,
+    course_id: String,
+    /// Curriculum entries not yet processed.
+    entries: VecDeque<Value>,
+    /// Title of the most recent chapter entry seen in this course.
+    chapter_title: Option<String>,
+}
+
+/// Where a fetch is in its run.
+enum Stage {
+    ListCourses,
+    /// Courses not yet walked.
+    NextCourse(VecDeque<Value>),
+    Entries(CourseWalk),
+    Done,
 }
 
 #[cfg(test)]
@@ -1147,6 +1208,82 @@ mod tests {
         assert!(marker.live_ids.contains("course:1"));
         assert!(marker.live_ids.contains("lecture:1:10"));
         assert!(marker.live_ids.contains("lecture:1:11"));
+    }
+
+    /// A long run (many courses, optional per-lecture downloads) must hand
+    /// each course's items and checkpoint to the host before the next
+    /// course's curriculum is requested, instead of walking everything
+    /// first.
+    #[test]
+    fn fetch_yields_each_course_before_requesting_the_next_curriculum() {
+        let mut server = mockito::Server::new();
+        let courses = results_page(
+            vec![
+                course_json(1, "First", "first"),
+                course_json(2, "Second", "second"),
+            ],
+            None,
+        );
+        let _m_courses = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/api-2\.0/users/me/subscribed-courses/\?.*".to_string()),
+            )
+            .with_status(200)
+            .with_body(courses.to_string())
+            .expect(1)
+            .create();
+        let m_curr1 = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(
+                    r"^/api-2\.0/courses/1/subscriber-curriculum-items/.*".to_string(),
+                ),
+            )
+            .with_status(200)
+            .with_body(results_page(vec![lecture_json(10, "One", 1)], None).to_string())
+            .expect(1)
+            .create();
+        let m_curr2 = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(
+                    r"^/api-2\.0/courses/2/subscriber-curriculum-items/.*".to_string(),
+                ),
+            )
+            .with_status(200)
+            .with_body(results_page(vec![lecture_json(20, "Two", 1)], None).to_string())
+            .expect(1)
+            .create();
+
+        let mut connector = UdemyConnector::new(UdemyConfig::default()).with_base_url(server.url());
+        let ctx = ctx_with(no_sleep_client(), Some("tok"), None, None);
+        let mut iter = connector.fetch(&ctx);
+
+        // Course 1: its item, its lecture, then its checkpoint.
+        let first: Vec<FetchEvent> = (0..3).map(|_| iter.next().unwrap().unwrap()).collect();
+        assert!(matches!(&first[0], FetchEvent::Item(i) if i.external_id() == "course:1"));
+        assert!(matches!(&first[1], FetchEvent::Item(i) if i.external_id() == "lecture:1:10"));
+        match &first[2] {
+            FetchEvent::Checkpoint(cp) => assert_eq!(cp.note, "after course 1"),
+            other => panic!("expected course 1's checkpoint, got {other:?}"),
+        }
+        m_curr1.assert();
+        assert!(
+            !m_curr2.matched(),
+            "course 2's curriculum was requested before course 1 was consumed"
+        );
+
+        // Draining fetches course 2's curriculum exactly once and still
+        // ends with the reconcile marker covering both courses.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m_curr2.assert();
+        match rest.last() {
+            Some(FetchEvent::ReconcileMarker(m)) => {
+                assert!(m.live_ids.contains("course:1") && m.live_ids.contains("lecture:2:20"));
+            }
+            other => panic!("expected a final reconcile marker, got {other:?}"),
+        }
     }
 
     #[test]
