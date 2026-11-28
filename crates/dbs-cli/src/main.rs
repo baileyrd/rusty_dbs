@@ -733,14 +733,17 @@ fn cmd_init(config_path: &Path, force: bool) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    println!("Initialized database at {}", cfg.database);
+    println!(
+        "Initialized database at {}",
+        dbs_core::display_path(Path::new(&cfg.database_location()))
+    );
     println!(
         "\nNext steps:\n\
          \x20 1. Copy .env.example to .env and fill in your tokens (e.g. RAINDROP_TOKEN).\n\
@@ -900,7 +903,7 @@ fn cmd_backup(
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -995,7 +998,7 @@ fn cmd_status(config_path: &Path, source: Option<String>, json_out: bool) -> i32
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -1051,7 +1054,7 @@ fn cmd_history(config_path: &Path, source: Option<String>, limit: u32, json_out:
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -1176,7 +1179,7 @@ fn cmd_items(
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -1433,7 +1436,7 @@ fn cmd_stats(config_path: &Path, json_out: bool) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -1551,7 +1554,7 @@ fn cmd_export(
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -1674,7 +1677,7 @@ fn cmd_export_notes(
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -1734,7 +1737,7 @@ fn cmd_export_profiles(config_path: &Path, json_out: bool) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -1864,7 +1867,7 @@ fn cmd_export_wiki(
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -1980,7 +1983,7 @@ fn cmd_sources_list(config_path: &Path, json_out: bool) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2059,7 +2062,7 @@ fn cmd_sources_add(config_path: &Path, name: String, type_: String, set: Vec<Str
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2094,7 +2097,7 @@ fn cmd_sources_remove(config_path: &Path, name: String) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2120,7 +2123,7 @@ fn cmd_sources_set_enabled(config_path: &Path, name: String, enabled: bool) -> i
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2150,7 +2153,7 @@ fn cmd_sources_check(config_path: &Path) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2185,7 +2188,7 @@ fn cmd_connectors_list(config_path: &Path, json_out: bool, verbose: bool) -> i32
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2251,7 +2254,7 @@ fn cmd_connectors_describe(config_path: &Path, type_: String) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2339,7 +2342,7 @@ fn cmd_verify(config_path: &Path, source: Option<String>, archive: Option<PathBu
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2374,7 +2377,7 @@ fn cmd_restore(config_path: &Path, path: &Path, dry_run: bool, json_out: bool) -
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2442,7 +2445,7 @@ fn cmd_maintain(
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2510,7 +2513,7 @@ fn cmd_doctor(config_path: &Path, json_out: bool) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2683,7 +2686,7 @@ fn cmd_serve(
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2741,7 +2744,7 @@ fn cmd_capture(config_path: &Path, target: &str, out: Option<PathBuf>) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };
@@ -2900,7 +2903,7 @@ fn cmd_research_youtube_backup(config_path: &Path, args: YoutubeBackupResearchAr
         Ok(cfg) => cfg,
         Err(e) => return report_config_error(&e),
     };
-    let mut storage = match SqliteStorage::open(&cfg.database) {
+    let mut storage = match SqliteStorage::open(&cfg.database_location()) {
         Ok(s) => s,
         Err(e) => return report_config_error(&e),
     };

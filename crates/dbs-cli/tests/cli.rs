@@ -99,6 +99,39 @@ fn init_on_a_fresh_directory_writes_config_env_example_and_database() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Regression: a relative `database` resolves against the config file's
+/// directory, not the working directory. Every command used to open the
+/// raw relative path, so running `dbs --config other/dir/dbs.toml` from
+/// elsewhere created and used a database in the working directory (and
+/// parallel servers with separate configs collided on one shared file).
+#[test]
+fn init_puts_a_relative_database_next_to_the_config_not_in_the_working_dir() {
+    let config_dir = temp_dir("db-next-to-config");
+    let elsewhere = temp_dir("db-next-to-config-cwd");
+    let config_path = config_dir.join("dbs.toml");
+
+    let output = Command::new(dbs_bin())
+        .current_dir(&elsewhere)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    assert!(
+        config_dir.join("dbs.sqlite3").is_file(),
+        "database not created next to the config"
+    );
+    assert!(
+        !elsewhere.join("dbs.sqlite3").exists(),
+        "database was created in the working directory"
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+    std::fs::remove_dir_all(&elsewhere).ok();
+}
+
 #[test]
 fn init_rerun_does_not_clobber_the_existing_config() {
     let dir = temp_dir("no-clobber-init");
