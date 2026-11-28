@@ -679,3 +679,63 @@ fn subprocess_runner_prefers_dot_env_over_the_process_environment() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Mid-run progress: every commit (each `batch_max` flush and each
+/// connector checkpoint) reports running counts, so a long run visibly
+/// advances instead of showing "0 fetched" until it ends.
+#[test]
+fn each_mid_run_commit_reports_checkpoint_progress_with_running_counts() {
+    use dbs_core::{run_connector_subprocess_with_progress, ProgressEvent, ProgressPhase};
+    use std::sync::Mutex;
+
+    let (mut storage, source_id) = open_storage_with_source();
+    let run_id = storage
+        .begin_run(source_id, "rusty_dbs:fixture", "full", None)
+        .unwrap();
+    let rc = connector(&["run", "ok", "5"], Capabilities::default());
+    let seen: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
+    let sink = |e: &ProgressEvent| seen.lock().unwrap().push(e.clone());
+
+    let outcome = run_connector_subprocess_with_progress(
+        &mut storage,
+        &rc,
+        wire_ctx(source_id, run_id, "full"),
+        0.5,
+        2,
+        None,
+        Some(&sink),
+    )
+    .unwrap();
+    assert_eq!(outcome.items_seen, 5);
+
+    let seen = seen.into_inner().unwrap();
+    assert!(seen.iter().all(|e| e.phase == ProgressPhase::Checkpoint));
+    assert!(seen
+        .iter()
+        .all(|e| e.source == "fixture-source" && e.mode == "full"));
+    let fetched: Vec<u64> = seen.iter().map(|e| e.fetched).collect();
+    let created: Vec<u64> = seen.iter().map(|e| e.created).collect();
+    // Batch flushes at 2 and 4 items, then the checkpoint after item 5.
+    assert_eq!(fetched, vec![2, 4, 5], "{seen:?}");
+    assert_eq!(created, vec![2, 4, 5], "{seen:?}");
+}
+
+#[test]
+fn without_a_sink_the_plain_runner_entry_point_behaves_as_before() {
+    let (mut storage, source_id) = open_storage_with_source();
+    let run_id = storage
+        .begin_run(source_id, "rusty_dbs:fixture", "full", None)
+        .unwrap();
+    let rc = connector(&["run", "ok", "3"], Capabilities::default());
+    let outcome = run_connector_subprocess(
+        &mut storage,
+        &rc,
+        wire_ctx(source_id, run_id, "full"),
+        0.5,
+        2,
+        None,
+    )
+    .unwrap();
+    assert_eq!(outcome.items_seen, 3);
+    assert_eq!(outcome.stats.created, 3);
+}

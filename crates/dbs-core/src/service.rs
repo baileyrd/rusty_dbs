@@ -324,6 +324,42 @@ pub trait ConnectorRunner: Send + Sync {
         limit: Option<u32>,
         cancel: Option<&CancelToken>,
     ) -> Result<ConnectorRunOutcome, DbsError>;
+
+    /// [`ConnectorRunner::run_connector`] plus a sink for mid-run
+    /// progress: an implementation that streams can report each
+    /// committed page as a [`ProgressPhase::Checkpoint`] event, so a long
+    /// run visibly advances instead of sitting at "0 fetched" until it
+    /// ends. The default ignores `progress`, so a runner that can't
+    /// report mid-run progress needs no change.
+    #[allow(clippy::too_many_arguments)]
+    fn run_connector_with_progress(
+        &self,
+        storage: &mut dyn Storage,
+        connector: &RegisteredConnector,
+        run_id: i64,
+        source_id: i64,
+        source_name: &str,
+        mode: &str,
+        cursor: Option<&Cursor>,
+        since: Option<DateTime<Utc>>,
+        limit: Option<u32>,
+        cancel: Option<&CancelToken>,
+        progress: Option<&dyn ProgressSink>,
+    ) -> Result<ConnectorRunOutcome, DbsError> {
+        let _ = progress;
+        self.run_connector(
+            storage,
+            connector,
+            run_id,
+            source_id,
+            source_name,
+            mode,
+            cursor,
+            since,
+            limit,
+            cancel,
+        )
+    }
 }
 
 /// Stub [`ConnectorRunner`] for callers with no connector subprocess to
@@ -364,14 +400,11 @@ impl ConnectorRunner for UnimplementedRunner {
 /// mutability. `Sync` so one sink can be shared read-only across
 /// `backup --all --parallel N` worker threads.
 ///
-/// **Scope note (issue #67):** `BackupService::backup_source` currently
-/// hands off to [`ConnectorRunner`] as a single blocking call — there's
-/// no run/stream protocol yet (ADR-0001 steps 2-3) to report
-/// per-item progress from. Only [`ProgressPhase::SourceStart`] and
-/// [`ProgressPhase::SourceDone`] are emitted today; `Item`/
-/// `Checkpoint`/`Sweep` stay reserved on the enum for that follow-up
-/// issue to start emitting through this same seam without an API
-/// break.
+/// **What's emitted:** [`ProgressPhase::SourceStart`] and
+/// [`ProgressPhase::SourceDone`] around every run, and, from a runner
+/// that streams (`SubprocessRunner`), a [`ProgressPhase::Checkpoint`]
+/// after each committed batch or page carrying running counts.
+/// `Item`/`Sweep` stay reserved on the enum.
 pub trait ProgressSink: Sync {
     fn emit(&self, event: &ProgressEvent);
 }
@@ -640,7 +673,7 @@ impl<'a> BackupService<'a> {
             .map(|w| w - ChronoDuration::seconds(self.config.default_overlap_seconds as i64));
         let runner = self.runner;
         let storage: &mut dyn Storage = self.storage;
-        let outcome = runner.run_connector(
+        let outcome = runner.run_connector_with_progress(
             storage,
             &rc,
             run_id,
@@ -651,6 +684,7 @@ impl<'a> BackupService<'a> {
             since,
             opts.limit,
             opts.cancel.as_ref(),
+            opts.on_progress,
         );
         let finished_at = Utc::now();
 
