@@ -188,8 +188,7 @@ impl YouTubeConnector {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd
-            .spawn()
+        let child = dbs_connector_support::spawn_retrying_busy(&mut cmd)
             .map_err(|e| format!("failed to launch yt-dlp: {e}"))?;
         let timeout = Duration::from_secs(self.config.extract_timeout);
         let result =
