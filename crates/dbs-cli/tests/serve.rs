@@ -39,9 +39,9 @@ fn write_test_config(label: &str) -> PathBuf {
 /// How long to wait for a spawned `dbs serve` to start accepting
 /// connections or print its startup line. Every wait returns as soon as
 /// the server is ready, so a generous limit costs nothing when it starts
-/// quickly. 5s was too tight on loaded CI runners, where these tests run
-/// alongside the rest of the workspace's suites and intermittently failed
-/// with "never accepted a connection" though nothing was wrong.
+/// quickly. (These tests failed intermittently in CI with "never
+/// accepted a connection"; raising this from 5s did not stop that, so
+/// [`Server`] now reports the server's exit status and stderr instead.)
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Kills the wrapped child on drop, so a failing assertion never leaks
@@ -55,86 +55,123 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// A quick GET over a raw `TcpStream` — no HTTP client dependency
-/// needed just to check "is this the app skeleton answering".
-fn get(port: u16, path: &str) -> String {
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(mut stream) => {
-                stream
-                    .write_all(
-                        format!(
-                            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-                        )
-                        .as_bytes(),
-                    )
-                    .unwrap();
-                let mut response = Vec::new();
-                stream.read_to_end(&mut response).unwrap();
-                return String::from_utf8_lossy(&response).into_owned();
+/// A `dbs serve` started for one test: killed on drop, with its stderr
+/// captured to a file so a failure can say *why* the server isn't
+/// answering instead of just "connection refused".
+struct Server {
+    child: Child,
+    log: PathBuf,
+    port: u16,
+}
+
+impl Server {
+    /// Spawns `dbs serve --config <fresh config> <args...>` and remembers
+    /// `port` (where it should listen) for [`Server::get`]. `args` carries
+    /// every other flag, `--port` included, so the default-port test can
+    /// leave it out.
+    fn start(label: &str, port: u16, args: &[&str]) -> Self {
+        let config = write_test_config(label);
+        let log = config.with_file_name("serve-stderr.log");
+        let stderr = std::fs::File::create(&log).unwrap();
+        let child = Command::new(dbs_bin())
+            .arg("serve")
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .unwrap();
+        Self { child, log, port }
+    }
+
+    /// The server's stderr so far, for failure messages.
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// A quick GET over a raw `TcpStream` (no HTTP client dependency
+    /// needed just to check "is this the app skeleton answering"),
+    /// retried until the server accepts. Fails at once if the server
+    /// process has exited, reporting its status and stderr.
+    fn get(&mut self, path: &str) -> String {
+        let port = self.port;
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        loop {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                panic!(
+                    "dbs serve exited ({status}) before accepting on :{port}; stderr:
+{}",
+                    self.stderr()
+                );
             }
-            Err(_) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
+            match get_once(port, path) {
+                Ok(response) => return response,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!(
+                    "dbs serve never accepted a connection on :{port}: {e}; stderr:
+{}",
+                    self.stderr()
+                ),
             }
-            Err(e) => panic!("dbs serve never accepted a connection on :{port}: {e}"),
         }
     }
 }
 
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// One GET attempt; `Err` while nothing is listening yet.
+fn get_once(port: u16, path: &str) -> std::io::Result<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.write_all(
+        format!(
+            "GET {path} HTTP/1.1
+Host: 127.0.0.1
+Connection: close
+
+"
+        )
+        .as_bytes(),
+    )?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    Ok(String::from_utf8_lossy(&response).into_owned())
+}
+
 #[test]
 fn default_host_and_port_serve_the_app_skeleton() {
-    let child = Command::new(dbs_bin())
-        .arg("serve")
-        .arg("--config")
-        .arg(write_test_config("default"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let _guard = KillOnDrop(child);
+    let mut server = Server::start("default", 8000, &[]);
 
-    let response = get(8000, "/");
+    let response = server.get("/");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(response.contains("<!DOCTYPE html"), "{response}");
 }
 
 #[test]
 fn a_custom_port_is_actually_bound() {
-    let child = Command::new(dbs_bin())
-        .arg("serve")
-        .arg("--port")
-        .arg("18123")
-        .arg("--config")
-        .arg(write_test_config("custom-port"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let _guard = KillOnDrop(child);
+    let mut server = Server::start("custom-port", 18123, &["--port", "18123"]);
 
-    let response = get(18123, "/static/app.js");
+    let response = server.get("/static/app.js");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(response.contains("text/javascript"), "{response}");
 }
 
 #[test]
 fn localhost_by_name_is_actually_bound() {
-    let child = Command::new(dbs_bin())
-        .arg("serve")
-        .arg("--host")
-        .arg("localhost")
-        .arg("--port")
-        .arg("18124")
-        .arg("--config")
-        .arg(write_test_config("localhost-by-name"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let _guard = KillOnDrop(child);
+    let mut server = Server::start(
+        "localhost-by-name",
+        18124,
+        &["--host", "localhost", "--port", "18124"],
+    );
 
-    let response = get(18124, "/");
+    let response = server.get("/");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 }
 
@@ -224,27 +261,17 @@ fn binding_off_localhost_without_a_token_is_refused() {
 
 #[test]
 fn binding_off_localhost_with_a_token_is_actually_served_and_the_token_is_enforced() {
-    let child = Command::new(dbs_bin())
-        .arg("serve")
-        .arg("--host")
-        .arg("0.0.0.0")
-        .arg("--port")
-        .arg("18127")
-        .arg("--token")
-        .arg("secret")
-        .arg("--config")
-        .arg(write_test_config("token-enforced"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let _guard = KillOnDrop(child);
+    let mut server = Server::start(
+        "token-enforced",
+        18127,
+        &["--host", "0.0.0.0", "--port", "18127", "--token", "secret"],
+    );
 
     // The static frontend stays reachable without the token...
-    let response = get(18127, "/");
+    let response = server.get("/");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     // ...but an /api request without it is rejected.
-    let response = get(18127, "/api/whatever");
+    let response = server.get("/api/whatever");
     assert!(response.starts_with("HTTP/1.1 401"), "{response}");
 }
 
