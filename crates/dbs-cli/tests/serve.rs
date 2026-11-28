@@ -36,6 +36,14 @@ fn write_test_config(label: &str) -> PathBuf {
     config_path
 }
 
+/// How long to wait for a spawned `dbs serve` to start accepting
+/// connections or print its startup line. Every wait returns as soon as
+/// the server is ready, so a generous limit costs nothing when it starts
+/// quickly. 5s was too tight on loaded CI runners, where these tests run
+/// alongside the rest of the workspace's suites and intermittently failed
+/// with "never accepted a connection" though nothing was wrong.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Kills the wrapped child on drop, so a failing assertion never leaks
 /// a `dbs serve` process past the test that started it.
 struct KillOnDrop(Child);
@@ -50,7 +58,7 @@ impl Drop for KillOnDrop {
 /// A quick GET over a raw `TcpStream` — no HTTP client dependency
 /// needed just to check "is this the app skeleton answering".
 fn get(port: u16, path: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         match TcpStream::connect(("127.0.0.1", port)) {
             Ok(mut stream) => {
@@ -174,7 +182,7 @@ fn schedule_flag_is_reflected_in_the_report() {
     assert!(wait_for_stderr_line(
         &mut child,
         "scheduler",
-        Duration::from_secs(5)
+        STARTUP_TIMEOUT
     ));
     let _guard = KillOnDrop(child);
 }
@@ -195,7 +203,7 @@ fn no_setup_flag_is_reflected_in_the_report() {
     assert!(wait_for_stderr_line(
         &mut child,
         "--no-setup noted",
-        Duration::from_secs(5)
+        STARTUP_TIMEOUT
     ));
     let _guard = KillOnDrop(child);
 }
