@@ -1915,6 +1915,36 @@ async function startBackup(spec) {
   }
 }
 
+// Ticks once a second while a backup runs, so the panel visibly moves
+// even when a slow connector hasn't reported its first page yet.
+let progressTicker = null;
+let progressStartedMs = 0;
+let progressLastEventMs = 0;
+let progressFetched = 0;
+
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+function renderProgressClock() {
+  const now = Date.now();
+  let text = `running ${fmtElapsed(now - progressStartedMs)}`;
+  if (progressFetched === 0) {
+    text += " · waiting for the first page…";
+  } else if (now - progressLastEventMs > 15000) {
+    // Still alive, just between pages (large page, or the service is
+    // rate-limiting us); say so rather than look frozen.
+    text += ` · last update ${fmtElapsed(now - progressLastEventMs)} ago`;
+  }
+  $("#progress-pct").textContent = text;
+}
+
+function stopProgressClock() {
+  clearInterval(progressTicker);
+  progressTicker = null;
+}
+
 function openProgress(job) {
   const panel = $("#progress");
   panel.classList.remove("hidden");
@@ -1927,6 +1957,7 @@ function openProgress(job) {
   progressWasStopped = false;
   const bar = $("#progress-bar");
   bar.style.width = "0%";
+  bar.classList.add("indeterminate");
   setBackupButtons(true);
 
   // Arm the Stop button for this job (graceful early stop).
@@ -1940,6 +1971,14 @@ function openProgress(job) {
   let doneCount = 0;
   let total = job.spec.all ? null : 1;
 
+  const startedSec = Number(job.started_at);
+  progressStartedMs = Number.isFinite(startedSec) && startedSec > 0 ? startedSec * 1000 : Date.now();
+  progressLastEventMs = Date.now();
+  progressFetched = 0;
+  stopProgressClock();
+  renderProgressClock();
+  progressTicker = setInterval(renderProgressClock, 1000);
+
   activeES = new EventSource(withToken(`/api/backup/${job.id}/stream`));
   activeES.onmessage = (m) => {
     const ev = JSON.parse(m.data);
@@ -1952,20 +1991,23 @@ function openProgress(job) {
     } else {
       $("#progress-sub").textContent = pos;
       const stats = `+${ev.created} ~${ev.updated} =${ev.unchanged}` + (ev.deleted ? ` ✕${ev.deleted}` : "");
-      $("#progress-line").textContent = `${ev.source} [${ev.mode}] ${(ev.fetched ?? 0).toLocaleString()} fetched (${stats})`;
+      const where = ev.phase === "checkpoint" && ev.note ? ` · ${ev.note}` : "";
+      $("#progress-line").textContent = `${ev.source} [${ev.mode}] ${(ev.fetched ?? 0).toLocaleString()} fetched (${stats})${where}`;
+      if (ev.phase === "checkpoint") progressFetched = Math.max(progressFetched, ev.fetched || 0);
     }
+    progressLastEventMs = Date.now();
     if (ev.phase === "source_done" && ev.result) {
       doneCount++;
       addResult(ev.result);
     }
-    if (total) {
+    // Item totals are unknown up front, so a single source has no real
+    // fraction to show: keep the bar moving instead of a frozen 0%. With
+    // several sources, show how many have finished.
+    if (total && total > 1 && doneCount > 0) {
       bar.classList.remove("indeterminate");
-      const pct = Math.round((doneCount / total) * 100);
-      bar.style.width = pct + "%";
-      $("#progress-pct").textContent = pct + "%";
+      bar.style.width = Math.round((doneCount / total) * 100) + "%";
     } else {
       bar.classList.add("indeterminate");
-      $("#progress-pct").textContent = "";
     }
   };
   activeES.addEventListener("end", (m) => finishProgress(JSON.parse(m.data)));
@@ -2000,6 +2042,7 @@ async function stopBackup() {
 $("#progress-stop").addEventListener("click", stopBackup);
 
 function finishProgress(snap) {
+  stopProgressClock();
   if (activeES) { activeES.close(); activeES = null; }
   activeJobId = null;
   const stop = $("#progress-stop");
@@ -2009,7 +2052,7 @@ function finishProgress(snap) {
   const bar = $("#progress-bar");
   bar.classList.remove("indeterminate");
   bar.style.width = "100%";
-  $("#progress-pct").textContent = "100%";
+  $("#progress-pct").textContent = progressStartedMs ? `done in ${fmtElapsed(Date.now() - progressStartedMs)}` : "";
   if (snap.status === "error") {
     $("#progress-results").append(el("div", { className: "st-failed mono", textContent: snap.error || "error" }));
   } else if (snap.results && $("#progress-results").childElementCount === 0) {

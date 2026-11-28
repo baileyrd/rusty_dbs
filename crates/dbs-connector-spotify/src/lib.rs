@@ -30,6 +30,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+use dbs_connector_support::{step_fetch, EventQueue, Step};
 use dbs_core::parse_iso;
 use dbs_core::{
     BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor, FetchEvent, ItemKind,
@@ -167,15 +168,8 @@ impl SpotifyConnector {
             .map_err(|e| ConnectorError::Transient(format!("invalid JSON response: {e}")))
     }
 
-    fn fetch_tracks(
-        &self,
-        http: &RefCell<ManagedHttpClient>,
-        token: &str,
-        cursor: &mut serde_json::Map<String, Value>,
-        full: bool,
-        live_ids: &mut HashSet<String>,
-        out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-    ) {
+    /// Prepares the liked-tracks walk from the watermark in `cursor`.
+    fn start_tracks(&self, cursor: &serde_json::Map<String, Value>, full: bool) -> TracksWalk {
         let high = if full {
             None
         } else {
@@ -184,131 +178,180 @@ impl SpotifyConnector {
                 .and_then(|v| v.as_str())
                 .and_then(|s| parse_iso(Some(s)))
         };
-        let mut max_seen: Option<String> = cursor
+        let max_seen: Option<String> = cursor
             .get("tracks_high_watermark")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut offset = 0u32;
-        let mut page = 1u32;
-        let mut stop = false;
-
-        while !stop {
-            let url = format!("{}/me/tracks", self.api_base);
-            let params = [
-                ("limit", self.config.page_size.to_string()),
-                ("offset", offset.to_string()),
-            ];
-            let payload = match self.get_json(http, &url, token, &params) {
-                Ok(p) => p,
-                Err(e) => {
-                    out.push(Err(e));
-                    return;
-                }
-            };
-            let entries = payload
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            for entry in &entries {
-                let added_at = entry
-                    .get("added_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let ts = parse_iso(Some(&added_at));
-                if let (Some(h), Some(t)) = (high, ts) {
-                    if t < h - chrono::Duration::seconds(OVERLAP_SECONDS) {
-                        stop = true;
-                        break;
-                    }
-                }
-                let Some(item) = track_item(entry) else {
-                    continue;
-                };
-                live_ids.insert(item.external_id().to_string());
-                if !added_at.is_empty() && max_seen.as_deref().is_none_or(|m| added_at.as_str() > m)
-                {
-                    max_seen = Some(added_at.clone());
-                }
-                out.push(Ok(FetchEvent::Item(item)));
-            }
-            // Mid-phase checkpoints carry the OLD watermark: advancing
-            // it before the walk completes would let a crash skip the
-            // gap between the old mark and the last committed page
-            // forever.
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(cursor.clone()),
-                },
-                note: format!("tracks page {page}"),
-            })));
-            let has_next = payload.get("next").is_some_and(|v| !v.is_null());
-            if stop || !has_next || entries.is_empty() {
-                break;
-            }
-            offset += entries.len() as u32;
-            page += 1;
+        TracksWalk {
+            high,
+            max_seen,
+            paging: Paging::default(),
         }
-        if let Some(seen) = max_seen {
+    }
+
+    /// Fetches one page of liked tracks, queueing its items and its
+    /// checkpoint. Returns `Ok(true)` if another page follows; after the
+    /// last page (or the incremental early-stop) it also advances the
+    /// watermark, queues the closing checkpoint, and returns `Ok(false)`.
+    ///
+    /// Called once per page by `fetch`'s [`step_fetch`] step, so each page
+    /// reaches the host (and is committed) before the next is requested.
+    fn tracks_page(
+        &self,
+        http: &RefCell<ManagedHttpClient>,
+        token: &str,
+        walk: &mut TracksWalk,
+        cursor: &mut serde_json::Map<String, Value>,
+        live_ids: &mut HashSet<String>,
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
+        let url = format!("{}/me/tracks", self.api_base);
+        let params = [
+            ("limit", self.config.page_size.to_string()),
+            ("offset", walk.paging.offset.to_string()),
+        ];
+        let payload = self.get_json(http, &url, token, &params)?;
+        let entries = payload
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut stop = false;
+        for entry in &entries {
+            let added_at = entry
+                .get("added_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let ts = parse_iso(Some(&added_at));
+            if let (Some(h), Some(t)) = (walk.high, ts) {
+                if t < h - chrono::Duration::seconds(OVERLAP_SECONDS) {
+                    stop = true;
+                    break;
+                }
+            }
+            let Some(item) = track_item(entry) else {
+                continue;
+            };
+            live_ids.insert(item.external_id().to_string());
+            if !added_at.is_empty()
+                && walk
+                    .max_seen
+                    .as_deref()
+                    .is_none_or(|m| added_at.as_str() > m)
+            {
+                walk.max_seen = Some(added_at.clone());
+            }
+            out.push_back(Ok(FetchEvent::Item(item)));
+        }
+        // Mid-phase checkpoints carry the OLD watermark: advancing
+        // it before the walk completes would let a crash skip the
+        // gap between the old mark and the last committed page
+        // forever.
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: Value::Object(cursor.clone()),
+            },
+            note: format!("tracks page {}", walk.paging.page),
+        })));
+        let has_next = payload.get("next").is_some_and(|v| !v.is_null());
+        if !stop && has_next && !entries.is_empty() {
+            walk.paging.advance(entries.len());
+            return Ok(true);
+        }
+        if let Some(seen) = walk.max_seen.take() {
             cursor.insert("tracks_high_watermark".to_string(), Value::String(seen));
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
+            out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
                 cursor: Cursor {
                     value: Value::Object(cursor.clone()),
                 },
                 note: "tracks done".to_string(),
             })));
         }
+        Ok(false)
     }
 
-    fn fetch_playlists(
+    /// Fetches one page of playlists, queueing its items and its
+    /// checkpoint. Returns `Ok(true)` if another page follows.
+    fn playlists_page(
         &self,
         http: &RefCell<ManagedHttpClient>,
         token: &str,
+        paging: &mut Paging,
         live_ids: &mut HashSet<String>,
-        out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-    ) {
-        let mut offset = 0u32;
-        let mut page = 1u32;
-        loop {
-            let url = format!("{}/me/playlists", self.api_base);
-            let params = [
-                ("limit", self.config.page_size.to_string()),
-                ("offset", offset.to_string()),
-            ];
-            let payload = match self.get_json(http, &url, token, &params) {
-                Ok(p) => p,
-                Err(e) => {
-                    out.push(Err(e));
-                    return;
-                }
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
+        let url = format!("{}/me/playlists", self.api_base);
+        let params = [
+            ("limit", self.config.page_size.to_string()),
+            ("offset", paging.offset.to_string()),
+        ];
+        let payload = self.get_json(http, &url, token, &params)?;
+        let entries = payload
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for pl in &entries {
+            let Some(item) = playlist_item(pl) else {
+                continue;
             };
-            let entries = payload
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            for pl in &entries {
-                let Some(item) = playlist_item(pl) else {
-                    continue;
-                };
-                live_ids.insert(item.external_id().to_string());
-                out.push(Ok(FetchEvent::Item(item)));
-            }
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(serde_json::Map::new()),
-                },
-                note: format!("playlists page {page}"),
-            })));
-            let has_next = payload.get("next").is_some_and(|v| !v.is_null());
-            if !has_next || entries.is_empty() {
-                break;
-            }
-            offset += entries.len() as u32;
-            page += 1;
+            live_ids.insert(item.external_id().to_string());
+            out.push_back(Ok(FetchEvent::Item(item)));
         }
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: Value::Object(serde_json::Map::new()),
+            },
+            note: format!("playlists page {}", paging.page),
+        })));
+        let has_next = payload.get("next").is_some_and(|v| !v.is_null());
+        if !has_next || entries.is_empty() {
+            return Ok(false);
+        }
+        paging.advance(entries.len());
+        Ok(true)
     }
+}
+
+/// Offset paging position, carried between `fetch` steps.
+#[derive(Debug, Clone, Copy)]
+struct Paging {
+    offset: u32,
+    /// 1-based page number, for checkpoint notes.
+    page: u32,
+}
+
+impl Default for Paging {
+    fn default() -> Self {
+        Self { offset: 0, page: 1 }
+    }
+}
+
+impl Paging {
+    /// Moves past a page that held `len` entries.
+    fn advance(&mut self, len: usize) {
+        self.offset += len as u32;
+        self.page += 1;
+    }
+}
+
+/// Paging state for the liked-tracks walk.
+struct TracksWalk {
+    /// Incremental early-stop watermark; `None` on a full/reconcile run.
+    high: Option<chrono::DateTime<chrono::Utc>>,
+    max_seen: Option<String>,
+    paging: Paging,
+}
+
+/// Where a fetch is in its run.
+enum Stage {
+    Tracks(TracksWalk),
+    Playlists(Paging),
+    /// Every enabled kind finished without error: emit the reconcile
+    /// marker if this run earned one.
+    Finish,
+    Done,
 }
 
 fn track_item(entry: &Value) -> Option<BackupItem> {
@@ -589,36 +632,81 @@ impl Connector for SpotifyConnector {
             .cloned()
             .unwrap_or_default();
         let mut live_ids = HashSet::new();
-
-        if self.config.include_liked_tracks {
-            self.fetch_tracks(http, &token, &mut cursor, full, &mut live_ids, &mut out);
-            if matches!(out.last(), Some(Err(_))) {
-                return Box::new(out.into_iter());
-            }
-        }
-        if self.config.include_playlists {
-            self.fetch_playlists(http, &token, &mut live_ids, &mut out);
-            if matches!(out.last(), Some(Err(_))) {
-                return Box::new(out.into_iter());
-            }
-        }
-
-        if full {
-            if self.config.include_liked_tracks && self.config.include_playlists {
-                out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
-                    live_ids,
-                ))));
+        let include_playlists = self.config.include_playlists;
+        let all_enabled = self.config.include_liked_tracks && include_playlists;
+        let after_tracks = move || {
+            if include_playlists {
+                Stage::Playlists(Paging::default())
             } else {
-                // A deliberately-partial enumeration must never offer
-                // the skipped kind's stored items up for the sweep.
-                // No logger equivalent exists in `RunContext` yet
-                // (same gap `github`'s (#86) doc-comment calls out) —
-                // stderr stands in.
-                eprintln!("spotify: a kind is disabled — deletion detection skipped");
+                Stage::Finish
             }
-        }
+        };
+        let mut stage = if self.config.include_liked_tracks {
+            Stage::Tracks(self.start_tracks(&cursor, full))
+        } else {
+            after_tracks()
+        };
+        let this = &*self;
 
-        Box::new(out.into_iter())
+        // One step = one page. Each page's items and checkpoint reach the
+        // host (and are committed) before the next page is requested.
+        step_fetch(
+            move |out| match std::mem::replace(&mut stage, Stage::Done) {
+                Stage::Tracks(mut walk) => {
+                    match this.tracks_page(http, &token, &mut walk, &mut cursor, &mut live_ids, out)
+                    {
+                        Ok(true) => {
+                            stage = Stage::Tracks(walk);
+                            Step::More
+                        }
+                        Ok(false) => {
+                            stage = after_tracks();
+                            Step::More
+                        }
+                        // An error ends the run; nothing after it is fetched, and no
+                        // reconcile marker is sent for a partial listing.
+                        Err(e) => {
+                            out.push_back(Err(e));
+                            Step::Done
+                        }
+                    }
+                }
+                Stage::Playlists(mut paging) => {
+                    match this.playlists_page(http, &token, &mut paging, &mut live_ids, out) {
+                        Ok(true) => {
+                            stage = Stage::Playlists(paging);
+                            Step::More
+                        }
+                        Ok(false) => {
+                            stage = Stage::Finish;
+                            Step::More
+                        }
+                        Err(e) => {
+                            out.push_back(Err(e));
+                            Step::Done
+                        }
+                    }
+                }
+                Stage::Finish => {
+                    if full {
+                        if all_enabled {
+                            out.push_back(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
+                                std::mem::take(&mut live_ids),
+                            ))));
+                        } else {
+                            // A deliberately-partial enumeration must never offer
+                            // the skipped kind's stored items up for the sweep.
+                            // No logger equivalent exists in `RunContext` yet
+                            // (same gap `github`'s (#86) doc-comment calls out) —
+                            // stderr stands in.
+                            eprintln!("spotify: a kind is disabled — deletion detection skipped");
+                        }
+                    }
+                    Step::Done
+                }
+                Stage::Done => Step::Done,
+            },
+        )
     }
 }
 
@@ -837,6 +925,93 @@ mod tests {
         assert!(marker.is_some(), "{evs:?}");
         let marker = marker.unwrap();
         assert!(marker.live_ids.contains("track:t1") && marker.live_ids.contains("playlist:p1"));
+    }
+
+    /// The fix for "a big first backup shows nothing and saves nothing
+    /// until it finishes": page N+1 must not be requested until page N's
+    /// events, ending in its checkpoint, have been handed to the caller.
+    #[test]
+    fn fetch_yields_each_page_before_requesting_the_next() {
+        let mut server = mockito::Server::new();
+        let _m_token = server
+            .mock("POST", "/api/token")
+            .with_status(200)
+            .with_body(token_body())
+            .create();
+        let next = format!("{}/me/tracks?offset=1", server.url());
+        let page0 = page(
+            vec![track_entry(
+                "t1",
+                "Song 1",
+                "Artist",
+                "2024-06-02T00:00:00Z",
+            )],
+            Some(&next),
+        );
+        let page1 = page(
+            vec![track_entry(
+                "t2",
+                "Song 2",
+                "Artist",
+                "2024-06-01T00:00:00Z",
+            )],
+            None,
+        );
+        let m0 = server
+            .mock("GET", "/me/tracks")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "offset".to_string(),
+                "0".to_string(),
+            ))
+            .with_status(200)
+            .with_body(page0.to_string())
+            .expect(1)
+            .create();
+        let m1 = server
+            .mock("GET", "/me/tracks")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "offset".to_string(),
+                "1".to_string(),
+            ))
+            .with_status(200)
+            .with_body(page1.to_string())
+            .expect(1)
+            .create();
+
+        let mut connector = SpotifyConnector::new(SpotifyConfig {
+            include_playlists: false,
+            ..SpotifyConfig::default()
+        })
+        .with_api_base(server.url())
+        .with_token_url(format!("{}/api/token", server.url()));
+        let ctx = ctx_with(
+            "full",
+            None,
+            no_sleep_client(),
+            Some(("id", "secret", "refresh")),
+        );
+        let mut iter = connector.fetch(&ctx);
+
+        // Page 1: one track, then its checkpoint.
+        assert!(matches!(iter.next(), Some(Ok(FetchEvent::Item(_)))));
+        match iter.next() {
+            Some(Ok(FetchEvent::Checkpoint(cp))) => assert_eq!(cp.note, "tracks page 1"),
+            other => panic!("expected page 1's checkpoint, got {other:?}"),
+        }
+        m0.assert();
+        assert!(
+            !m1.matched(),
+            "page 2 was requested before page 1 was consumed"
+        );
+
+        // Draining the rest fetches page 2 exactly once.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m1.assert();
+        assert!(matches!(&rest[0], FetchEvent::Item(i) if i.external_id() == "track:t2"));
+        match rest.last() {
+            Some(FetchEvent::Checkpoint(cp)) => assert_eq!(cp.note, "tracks done"),
+            other => panic!("expected the closing checkpoint, got {other:?}"),
+        }
     }
 
     #[test]

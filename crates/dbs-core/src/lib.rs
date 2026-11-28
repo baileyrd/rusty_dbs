@@ -69,8 +69,8 @@ pub use restore::{
     ArchiveIntegrity,
 };
 pub use run_stream::{
-    run_connector_subprocess, SubprocessRunner, WireErrorKind, WireLine, WireOutcome,
-    WireRunContext,
+    run_connector_subprocess, run_connector_subprocess_with_progress, SubprocessRunner,
+    WireErrorKind, WireLine, WireOutcome, WireRunContext,
 };
 pub use secrets::Secrets;
 pub use service::{ConnectorRunOutcome, ConnectorRunner, UnimplementedRunner};

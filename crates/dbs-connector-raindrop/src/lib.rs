@@ -46,7 +46,9 @@
 //! directly against the `Connector` trait and fixture HTTP responses.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
+use dbs_connector_support::{step_fetch, EventQueue, Step};
 use dbs_core::{iso_z, parse_iso};
 use dbs_core::{
     BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor, FetchEvent, ItemKind,
@@ -138,118 +140,98 @@ impl RaindropConnector {
         self
     }
 
-    fn fetch_collection(
+    /// Fetches one page of the main collection and turns it into events:
+    /// its items, then a checkpoint whose cursor covers everything seen
+    /// so far. Returns whether another page should be fetched.
+    ///
+    /// Called once per page by `fetch`'s [`step_fetch`] step, so each page reaches the
+    /// host (and is committed at its checkpoint) before the next request
+    /// is made. A full run on a large library used to collect every page
+    /// in memory first, showing no progress and saving nothing until the
+    /// very end.
+    fn collection_page(
         &self,
         http: &RefCell<ManagedHttpClient>,
         token: &str,
-        mut cursor: serde_json::Map<String, serde_json::Value>,
-        full: bool,
-        out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-    ) {
-        let created_hw = cursor
-            .get("created_high_watermark")
-            .and_then(|v| v.as_str())
-            .and_then(|s| parse_iso(Some(s)));
-        let stop_at = if !full {
-            created_hw.map(|hw| hw - chrono::Duration::seconds(self.config.overlap_seconds))
-        } else {
-            None
-        };
-
-        let mut max_created = created_hw;
-        let mut live_ids: Option<std::collections::HashSet<String>> =
-            full.then(std::collections::HashSet::new);
+        state: &mut CollectionState,
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
         let url = format!(
             "{}/rest/v1/raindrops/{}",
             self.base_url, self.config.collection_id
         );
-        let mut page = 0u32;
+        let data = self.get_page(http, &url, token, state.page)?;
+        let items = data
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if items.is_empty() {
+            return Ok(false);
+        }
+
         let mut reached_old = false;
-
-        loop {
-            let data = match self.get_page(http, &url, token, page) {
-                Ok(d) => d,
-                Err(e) => {
-                    out.push(Err(e));
-                    return;
-                }
-            };
-            let items = data
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
+        for raw in &items {
+            let created = raw
+                .get("created")
+                .and_then(|v| v.as_str())
+                .and_then(|s| parse_iso(Some(s)));
+            let ext_id = raw
+                .get("_id")
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
                 .unwrap_or_default();
-            if items.is_empty() {
-                break;
+            if let Some(live) = state.live_ids.as_mut() {
+                // Records EVERY upstream id (even ones excluded by
+                // include_types) so the reconcile sweep never deletes
+                // items that still exist upstream but are simply out
+                // of this source's current scope.
+                live.insert(ext_id.clone());
             }
-
-            for raw in &items {
-                let created = raw
-                    .get("created")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| parse_iso(Some(s)));
-                let ext_id = raw
-                    .get("_id")
-                    .map(|v| match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                    .unwrap_or_default();
-                if let Some(live) = live_ids.as_mut() {
-                    // Records EVERY upstream id (even ones excluded by
-                    // include_types) so the reconcile sweep never deletes
-                    // items that still exist upstream but are simply out
-                    // of this source's current scope.
-                    live.insert(ext_id.clone());
+            if let (Some(stop), Some(created)) = (state.stop_at, created) {
+                if created < stop {
+                    reached_old = true;
+                    break;
                 }
-                if !full {
-                    if let (Some(stop), Some(created)) = (stop_at, created) {
-                        if created < stop {
-                            reached_old = true;
-                            break;
-                        }
+            }
+            if state.max_created.is_none() || created.is_some_and(|c| Some(c) > state.max_created) {
+                state.max_created = created;
+            }
+            match self.to_item(raw, false) {
+                Ok(item) => {
+                    if !self.config.include_types.is_empty()
+                        && !self.config.include_types.contains(&item.item_kind)
+                    {
+                        continue;
                     }
+                    out.push_back(Ok(FetchEvent::Item(item)));
                 }
-                if max_created.is_none() || created.is_some_and(|c| Some(c) > max_created) {
-                    max_created = created;
-                }
-                match self.to_item(raw, false) {
-                    Ok(item) => {
-                        if !self.config.include_types.is_empty()
-                            && !self.config.include_types.contains(&item.item_kind)
-                        {
-                            continue;
-                        }
-                        out.push(Ok(FetchEvent::Item(item)));
-                    }
-                    Err(e) => out.push(Err(e)),
-                }
+                Err(e) => out.push_back(Err(e)),
             }
-
-            if let Some(mc) = max_created {
-                cursor.insert(
-                    "created_high_watermark".to_string(),
-                    serde_json::Value::String(iso_z(mc)),
-                );
-            }
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: serde_json::Value::Object(cursor.clone()),
-                },
-                note: format!("collection page {page}"),
-            })));
-
-            if reached_old || (items.len() as u32) < self.config.page_size {
-                break;
-            }
-            page += 1;
         }
 
-        if let Some(live) = live_ids {
-            out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(live))));
+        if let Some(mc) = state.max_created {
+            state.cursor.insert(
+                "created_high_watermark".to_string(),
+                serde_json::Value::String(iso_z(mc)),
+            );
         }
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: serde_json::Value::Object(state.cursor.clone()),
+            },
+            note: format!("collection page {}", state.page),
+        })));
+
+        let more = !reached_old && (items.len() as u32) >= self.config.page_size;
+        state.page += 1;
+        Ok(more)
     }
 
+    /// Fetches one page of Trash, yielding each item as deleted.
+    ///
     /// IMPORTANT: a raindrop's `created` is its ORIGINAL creation date,
     /// not the date it was trashed, and the API has no trash-time
     /// sort. So an old bookmark trashed today sorts to the END of the
@@ -258,48 +240,37 @@ impl RaindropConnector {
     /// trash collection every run; trash is bounded (Raindrop empties
     /// it periodically) and re-seeing an already-deleted item is a
     /// cheap idempotent no-op in the engine.
-    fn poll_trash(
+    fn trash_page(
         &self,
         http: &RefCell<ManagedHttpClient>,
         token: &str,
+        page: u32,
         cursor: &serde_json::Map<String, serde_json::Value>,
-        out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-    ) {
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
         let url = format!("{}/rest/v1/raindrops/{TRASH_COLLECTION}", self.base_url);
-        let mut page = 0u32;
-        loop {
-            let data = match self.get_page(http, &url, token, page) {
-                Ok(d) => d,
-                Err(e) => {
-                    out.push(Err(e));
-                    return;
-                }
-            };
-            let items = data
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if items.is_empty() {
-                break;
-            }
-            for raw in &items {
-                match self.to_item(raw, true) {
-                    Ok(item) => out.push(Ok(FetchEvent::Item(item))),
-                    Err(e) => out.push(Err(e)),
-                }
-            }
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: serde_json::Value::Object(cursor.clone()),
-                },
-                note: format!("trash page {page}"),
-            })));
-            if (items.len() as u32) < self.config.page_size {
-                break;
-            }
-            page += 1;
+        let data = self.get_page(http, &url, token, page)?;
+        let items = data
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if items.is_empty() {
+            return Ok(false);
         }
+        for raw in &items {
+            match self.to_item(raw, true) {
+                Ok(item) => out.push_back(Ok(FetchEvent::Item(item))),
+                Err(e) => out.push_back(Err(e)),
+            }
+        }
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: serde_json::Value::Object(cursor.clone()),
+            },
+            note: format!("trash page {page}"),
+        })));
+        Ok((items.len() as u32) >= self.config.page_size)
     }
 
     fn get_page(
@@ -646,6 +617,7 @@ impl Connector for RaindropConnector {
         &'a mut self,
         ctx: &'a RunContext,
     ) -> Box<dyn Iterator<Item = Result<FetchEvent, ConnectorError>> + 'a> {
+        // Setup errors are reported as a one-event iterator.
         let mut out = Vec::new();
 
         let Some(http) = ctx.http.as_ref() else {
@@ -677,15 +649,92 @@ impl Connector for RaindropConnector {
             .cloned()
             .unwrap_or_default();
         let full = ctx.mode == "full" || ctx.mode == "reconcile";
+        let created_hw = cursor
+            .get("created_high_watermark")
+            .and_then(|v| v.as_str())
+            .and_then(|s| parse_iso(Some(s)));
+        let stop_at = if full {
+            None
+        } else {
+            created_hw.map(|hw| hw - chrono::Duration::seconds(self.config.overlap_seconds))
+        };
+        let poll_trash = self.config.poll_trash && ctx.mode == "incremental";
+        let initial_cursor = cursor.clone();
+        let mut stage = Stage::Collection(CollectionState {
+            cursor,
+            stop_at,
+            max_created: created_hw,
+            live_ids: full.then(HashSet::new),
+            page: 0,
+        });
+        let this = &*self;
 
-        self.fetch_collection(http, &token, cursor.clone(), full, &mut out);
-
-        if self.config.poll_trash && ctx.mode == "incremental" {
-            self.poll_trash(http, &token, &cursor, &mut out);
-        }
-
-        Box::new(out.into_iter())
+        // One step = one page. Each page's items and checkpoint reach the
+        // host (and are committed) before the next page is requested.
+        step_fetch(
+            move |out| match std::mem::replace(&mut stage, Stage::Done) {
+                Stage::Collection(mut state) => {
+                    match this.collection_page(http, &token, &mut state, out) {
+                        Ok(true) => {
+                            stage = Stage::Collection(state);
+                            Step::More
+                        }
+                        Ok(false) => {
+                            if let Some(live) = state.live_ids.take() {
+                                out.push_back(Ok(FetchEvent::ReconcileMarker(
+                                    ReconcileMarker::new(live),
+                                )));
+                            }
+                            if poll_trash {
+                                stage = Stage::Trash { page: 0 };
+                                Step::More
+                            } else {
+                                Step::Done
+                            }
+                        }
+                        // An error ends the run; nothing after it is fetched, and no
+                        // reconcile marker is sent for a partial listing.
+                        Err(e) => {
+                            out.push_back(Err(e));
+                            Step::Done
+                        }
+                    }
+                }
+                Stage::Trash { page } => {
+                    match this.trash_page(http, &token, page, &initial_cursor, out) {
+                        Ok(true) => {
+                            stage = Stage::Trash { page: page + 1 };
+                            Step::More
+                        }
+                        Ok(false) => Step::Done,
+                        Err(e) => {
+                            out.push_back(Err(e));
+                            Step::Done
+                        }
+                    }
+                }
+                Stage::Done => Step::Done,
+            },
+        )
     }
+}
+
+/// Per-run paging state for the main collection.
+struct CollectionState {
+    cursor: serde_json::Map<String, serde_json::Value>,
+    /// Incremental early-stop bound; `None` on a full/reconcile run.
+    stop_at: Option<chrono::DateTime<chrono::Utc>>,
+    max_created: Option<chrono::DateTime<chrono::Utc>>,
+    /// Every upstream id seen, collected on full/reconcile runs only.
+    live_ids: Option<HashSet<String>>,
+    page: u32,
+}
+
+/// Where a fetch is in its run.
+enum Stage {
+    Collection(CollectionState),
+    Trash { page: u32 },
+    Done,
 }
 
 #[cfg(test)]
@@ -744,6 +793,123 @@ mod tests {
         iter: Box<dyn Iterator<Item = Result<FetchEvent, ConnectorError>> + '_>,
     ) -> Vec<FetchEvent> {
         iter.map(|r| r.unwrap()).collect()
+    }
+
+    /// The fix for "a big first backup shows nothing and saves nothing
+    /// until it finishes": page N+1 must not be requested until page N's
+    /// events, ending in its checkpoint, have been handed to the caller.
+    #[test]
+    fn fetch_yields_each_page_before_requesting_the_next() {
+        let mut server = mockito::Server::new();
+        let page0 = serde_json::json!({"items": [
+            raindrop_json("1", "2024-01-03T00:00:00Z", "link"),
+            raindrop_json("2", "2024-01-02T00:00:00Z", "link"),
+        ]});
+        let page1 = serde_json::json!({"items": [
+            raindrop_json("3", "2024-01-01T00:00:00Z", "link"),
+        ]});
+        let m0 = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/rest/v1/raindrops/0.*page=0.*".to_string()),
+            )
+            .with_status(200)
+            .with_body(page0.to_string())
+            .expect(1)
+            .create();
+        let m1 = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/rest/v1/raindrops/0.*page=1.*".to_string()),
+            )
+            .with_status(200)
+            .with_body(page1.to_string())
+            .expect(1)
+            .create();
+
+        let mut connector = RaindropConnector::new(RaindropConfig {
+            page_size: 2,
+            ..RaindropConfig::default()
+        })
+        .with_base_url(server.url());
+        let ctx = ctx_with(
+            "full",
+            None,
+            no_sleep_client(&server.url()),
+            Some("secret-token"),
+        );
+        let mut iter = connector.fetch(&ctx);
+
+        // Page 0: two items, then its checkpoint.
+        let first_page: Vec<FetchEvent> = (0..3).map(|_| iter.next().unwrap().unwrap()).collect();
+        assert!(matches!(first_page[0], FetchEvent::Item(_)));
+        assert!(matches!(first_page[1], FetchEvent::Item(_)));
+        match &first_page[2] {
+            FetchEvent::Checkpoint(cp) => assert_eq!(cp.note, "collection page 0"),
+            other => panic!("expected page 0's checkpoint, got {other:?}"),
+        }
+        m0.assert();
+        assert!(
+            !m1.matched(),
+            "page 1 was requested before page 0 was consumed"
+        );
+
+        // Draining the rest fetches page 1 exactly once and still ends
+        // with the reconcile marker covering both pages.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m1.assert();
+        let marker = rest.iter().find_map(|e| match e {
+            FetchEvent::ReconcileMarker(m) => Some(m),
+            _ => None,
+        });
+        let marker = marker.expect("a full run ends with a reconcile marker");
+        assert!(["1", "2", "3"]
+            .iter()
+            .all(|id| marker.live_ids.contains(*id)));
+    }
+
+    #[test]
+    fn a_failed_page_ends_the_run_after_the_pages_already_yielded() {
+        let mut server = mockito::Server::new();
+        let page0 = serde_json::json!({"items": [
+            raindrop_json("1", "2024-01-03T00:00:00Z", "link"),
+            raindrop_json("2", "2024-01-02T00:00:00Z", "link"),
+        ]});
+        let _m0 = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/rest/v1/raindrops/0.*page=0.*".to_string()),
+            )
+            .with_status(200)
+            .with_body(page0.to_string())
+            .create();
+        let _m1 = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/rest/v1/raindrops/0.*page=1.*".to_string()),
+            )
+            .with_status(401)
+            .create();
+
+        let mut connector = RaindropConnector::new(RaindropConfig {
+            page_size: 2,
+            ..RaindropConfig::default()
+        })
+        .with_base_url(server.url());
+        let ctx = ctx_with(
+            "full",
+            None,
+            no_sleep_client(&server.url()),
+            Some("secret-token"),
+        );
+        let all: Vec<_> = connector.fetch(&ctx).collect();
+
+        // Page 0's items and checkpoint arrive (so the host commits them),
+        // then the error, then nothing more: no reconcile marker, because
+        // a partial listing must never drive a deletion sweep.
+        assert_eq!(all.len(), 4, "{all:?}");
+        assert!(matches!(all[2], Ok(FetchEvent::Checkpoint(_))));
+        assert!(all[3].is_err());
     }
 
     #[test]

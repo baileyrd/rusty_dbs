@@ -45,11 +45,11 @@
 //! end against a fake `yt-dlp` script on disk, the same pattern
 //! `dbs-connector-vimeo`/`dbs-connector-udemy` already use.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use dbs_connector_support::{run_with_watchdog, WatchdogError};
+use dbs_connector_support::{run_with_watchdog, step_fetch, EventQueue, Step, WatchdogError};
 use dbs_core::export_profile::ExportProfile;
 use dbs_core::{
     AuthCapture, BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor,
@@ -283,6 +283,63 @@ impl YouTubeConnector {
         }
         Some(out)
     }
+
+    /// Dumps one list and queues its items (deduplicated against every
+    /// list seen so far) and, if it had any entries, its checkpoint. A
+    /// list that fails to load is recorded in `progress.failed_lists`
+    /// and skipped, so the run continues with the next list.
+    fn process_list(
+        &self,
+        label: String,
+        source_url: &str,
+        playlist_end: Option<u32>,
+        cookiefile: Option<&str>,
+        out: &mut EventQueue,
+        progress: &mut ListProgress,
+    ) {
+        match self.dump_list(&label, source_url, playlist_end, cookiefile) {
+            Ok((title, entries)) => {
+                let captured_at = dbs_core::iso_z(chrono::Utc::now());
+                let last = entries.len().saturating_sub(1);
+                for (i, e) in entries.iter().enumerate() {
+                    let rec =
+                        entry_record((i + 1) as u32, e, &label, title.as_deref(), &captured_at);
+                    if let Some(item) = to_item(&label, &rec) {
+                        if progress.live_ids.contains(item.external_id()) {
+                            eprintln!("youtube: skipping duplicate entry {}", item.external_id());
+                        } else {
+                            progress.live_ids.insert(item.external_id().to_string());
+                            out.push_back(Ok(FetchEvent::Item(item)));
+                        }
+                    }
+                    if i == last && !entries.is_empty() {
+                        progress.seen_lists += 1;
+                        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+                            cursor: Cursor {
+                                value: serde_json::json!({"lists_done": progress.seen_lists}),
+                            },
+                            note: format!("after list {label}"),
+                        })));
+                    }
+                }
+            }
+            Err(msg) => {
+                eprintln!("youtube: {label} not accessible: {msg}");
+                progress.failed_lists.push(label);
+            }
+        }
+    }
+}
+
+/// Run-wide state carried across lists by [`YouTubeConnector::process_list`].
+#[derive(Debug, Default)]
+struct ListProgress {
+    /// Every item id yielded so far, for dedup and the reconcile marker.
+    live_ids: HashSet<String>,
+    /// Labels of lists that failed to load (partial enumeration).
+    failed_lists: Vec<String>,
+    /// Lists that yielded at least one entry, for the checkpoint cursor.
+    seen_lists: u32,
 }
 
 fn entry_record(
@@ -637,107 +694,63 @@ impl Connector for YouTubeConnector {
             targets.push((LIKED.0.to_string(), LIKED.1.to_string(), None));
         }
 
-        let mut live_ids = HashSet::new();
-        let mut failed_lists = Vec::new();
-        let mut seen_lists = 0u32;
+        let mut pending: VecDeque<(String, String, Option<u32>)> = targets.into();
+        let mut discover = self.config.playlists;
+        let mut progress = ListProgress::default();
+        let this = &*self;
 
-        let process_list = |label: String,
-                            source_url: &str,
-                            playlist_end: Option<u32>,
-                            out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-                            live_ids: &mut HashSet<String>,
-                            seen_lists: &mut u32,
-                            failed_lists: &mut Vec<String>| {
-            match self.dump_list(&label, source_url, playlist_end, cookiefile.as_deref()) {
-                Ok((title, entries)) => {
-                    let captured_at = dbs_core::iso_z(chrono::Utc::now());
-                    let last = entries.len().saturating_sub(1);
-                    for (i, e) in entries.iter().enumerate() {
-                        let rec =
-                            entry_record((i + 1) as u32, e, &label, title.as_deref(), &captured_at);
-                        if let Some(item) = to_item(&label, &rec) {
-                            if live_ids.contains(item.external_id()) {
-                                eprintln!(
-                                    "youtube: skipping duplicate entry {}",
-                                    item.external_id()
-                                );
-                            } else {
-                                live_ids.insert(item.external_id().to_string());
-                                out.push(Ok(FetchEvent::Item(item)));
-                            }
-                        }
-                        if i == last && !entries.is_empty() {
-                            *seen_lists += 1;
-                            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                                cursor: Cursor {
-                                    value: serde_json::json!({"lists_done": *seen_lists}),
-                                },
-                                note: format!("after list {label}"),
-                            })));
-                        }
-                    }
-                }
-                Err(msg) => {
-                    eprintln!("youtube: {label} not accessible: {msg}");
-                    failed_lists.push(label);
-                }
+        // One step = one list's yt-dlp dump (or the playlist discovery
+        // call), so each list's items and checkpoint reach the host
+        // before the next list is requested. Discovered playlists are
+        // queued behind the fixed targets, preserving the original order.
+        step_fetch(move |out| {
+            if let Some((label, source_url, playlist_end)) = pending.pop_front() {
+                this.process_list(
+                    label,
+                    &source_url,
+                    playlist_end,
+                    cookiefile.as_deref(),
+                    out,
+                    &mut progress,
+                );
+                return Step::More;
             }
-        };
-
-        for (label, source_url, playlist_end) in &targets {
-            process_list(
-                label.clone(),
-                source_url,
-                *playlist_end,
-                &mut out,
-                &mut live_ids,
-                &mut seen_lists,
-                &mut failed_lists,
-            );
-        }
-
-        if self.config.playlists {
-            match self.discover_playlists(cookiefile.as_deref()) {
-                Some(discovered) => {
-                    for (label, url) in discovered {
-                        process_list(
-                            label,
-                            &url,
-                            None,
-                            &mut out,
-                            &mut live_ids,
-                            &mut seen_lists,
-                            &mut failed_lists,
-                        );
-                    }
+            if discover {
+                discover = false;
+                match this.discover_playlists(cookiefile.as_deref()) {
+                    Some(discovered) => pending.extend(
+                        discovered
+                            .into_iter()
+                            .map(|(label, url)| (label, url, None)),
+                    ),
+                    None => progress.failed_lists.push("playlists".to_string()),
                 }
-                None => failed_lists.push("playlists".to_string()),
+                return Step::More;
             }
-        }
 
-        out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-            cursor: Cursor {
-                value: serde_json::json!({"lists_done": seen_lists}),
-            },
-            note: "final".to_string(),
-        })));
+            out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+                cursor: Cursor {
+                    value: serde_json::json!({"lists_done": progress.seen_lists}),
+                },
+                note: "final".to_string(),
+            })));
 
-        if !failed_lists.is_empty() {
-            // Partial enumeration: reconciling against incomplete data
-            // would sweep everything the failed list(s) contain.
-            eprintln!(
-                "youtube: {} list(s) failed to load ({}) — partial enumeration, deletion \
-                 detection skipped this run",
-                failed_lists.len(),
-                failed_lists.join(", ")
-            );
-        } else {
-            out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
-                live_ids,
-            ))));
-        }
-
-        Box::new(out.into_iter())
+            if !progress.failed_lists.is_empty() {
+                // Partial enumeration: reconciling against incomplete data
+                // would sweep everything the failed list(s) contain.
+                eprintln!(
+                    "youtube: {} list(s) failed to load ({}) — partial enumeration, deletion \
+                     detection skipped this run",
+                    progress.failed_lists.len(),
+                    progress.failed_lists.join(", ")
+                );
+            } else {
+                out.push_back(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
+                    std::mem::take(&mut progress.live_ids),
+                ))));
+            }
+            Step::Done
+        })
     }
 }
 
@@ -1068,6 +1081,79 @@ exit 0"#,
             .collect();
         assert_eq!(items.len(), 1, "{evs:?}");
         assert_eq!(items[0].title.as_deref(), Some("First"));
+    }
+
+    /// A fake `yt-dlp` that serves Watch Later and Liked, and touches
+    /// `marker` when asked for Liked. A `.cmd` on Windows and a `#!/bin/sh`
+    /// script elsewhere, so the laziness test below runs on both.
+    fn marker_fake_yt_dlp(dir: &Path, marker: &Path) -> std::path::PathBuf {
+        let marker = marker.display();
+        #[cfg(windows)]
+        {
+            let path = dir.join("fake-yt-dlp.cmd");
+            let body = format!(
+                "@echo off\r\n\
+                 echo %* | findstr /C:\"list=LL\" >nul\r\n\
+                 if not errorlevel 1 (\r\n\
+                 echo called> \"{marker}\"\r\n\
+                 echo {{\"title\":\"Liked\",\"entries\":[{{\"id\":\"v2\",\"title\":\"Two\"}}]}}\r\n\
+                 exit /b 0\r\n\
+                 )\r\n\
+                 echo %* | findstr /C:\"list=WL\" >nul\r\n\
+                 if not errorlevel 1 (\r\n\
+                 echo {{\"title\":\"Watch Later\",\"entries\":[{{\"id\":\"v1\",\"title\":\"One\"}}]}}\r\n\
+                 exit /b 0\r\n\
+                 )\r\n\
+                 echo {{\"entries\":[]}}\r\n"
+            );
+            std::fs::write(&path, body).unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            write_fake_yt_dlp(
+                dir,
+                "fake-yt-dlp.sh",
+                &format!(
+                    r#"case "$*" in
+  *"list=LL"*) touch "{marker}"; echo '{{"title":"Liked","entries":[{{"id":"v2","title":"Two"}}]}}' ;;
+  *"list=WL"*) echo '{{"title":"Watch Later","entries":[{{"id":"v1","title":"One"}}]}}' ;;
+  *) echo '{{"entries":[]}}' ;;
+esac
+exit 0"#
+                ),
+            )
+        }
+    }
+
+    #[test]
+    fn fetch_dumps_the_next_list_only_after_the_previous_lists_events_are_consumed() {
+        let dir = temp_dir("lazy");
+        let marker = dir.join("liked-dumped");
+        let _ = std::fs::remove_file(&marker);
+        let fake = marker_fake_yt_dlp(&dir, &marker);
+        let mut connector = YouTubeConnector::new(config_with_browser_cookies())
+            .with_yt_dlp_bin(fake.to_string_lossy());
+        let ctx = ctx_with(None);
+        let mut iter = connector.fetch(&ctx);
+
+        match iter.next() {
+            Some(Ok(FetchEvent::Item(i))) => assert_eq!(i.external_id(), "watch-later:v1"),
+            other => panic!("expected Watch Later's item first, got {other:?}"),
+        }
+        assert!(
+            !marker.exists(),
+            "Liked was dumped before Watch Later's events were consumed"
+        );
+
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        assert!(marker.exists(), "draining the iterator dumps Liked");
+        assert!(rest
+            .iter()
+            .any(|e| matches!(e, FetchEvent::Item(i) if i.external_id() == "liked:v2")));
+        assert!(rest
+            .iter()
+            .any(|e| matches!(e, FetchEvent::ReconcileMarker(_))));
     }
 
     #[test]

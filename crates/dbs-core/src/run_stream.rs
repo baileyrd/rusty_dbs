@@ -82,9 +82,9 @@ use crate::cancel::CancelToken;
 use crate::config::{parse_env_file, Config};
 use crate::engine::{prepare, sweep_deletions};
 use crate::errors::{ConnectorError, DbsError};
-use crate::models::{Cursor, FetchEvent, RunStatus};
+use crate::models::{Cursor, FetchEvent, ProgressEvent, ProgressPhase, RunStatus};
 use crate::registry::RegisteredConnector;
-use crate::service::{ConnectorRunOutcome, ConnectorRunner};
+use crate::service::{ConnectorRunOutcome, ConnectorRunner, ProgressSink};
 use crate::storage::{BatchResult, PreparedItem, Storage};
 
 /// Host → connector, one JSON line written to the child's stdin before
@@ -196,7 +196,6 @@ pub enum WireLine {
 // the *next* `!committed_any` check at each of this function's several
 // call sites — the lint can't see across separate macro expansions, so
 // it flags the assignment at the very last call on each path as dead.
-#[allow(unused_assignments)]
 pub fn run_connector_subprocess(
     storage: &mut dyn Storage,
     connector: &RegisteredConnector,
@@ -205,6 +204,34 @@ pub fn run_connector_subprocess(
     batch_max: usize,
     cancel: Option<&CancelToken>,
 ) -> Result<ConnectorRunOutcome, DbsError> {
+    run_connector_subprocess_with_progress(
+        storage,
+        connector,
+        wire_ctx,
+        sweep_safety_fraction,
+        batch_max,
+        cancel,
+        None,
+    )
+}
+
+/// [`run_connector_subprocess`], reporting a [`ProgressPhase::Checkpoint`]
+/// event to `progress` after every mid-run commit (each connector
+/// checkpoint, and each `batch_max` flush) with the running counts.
+/// Without this a long run showed "0 fetched" from start to finish.
+// See `run_connector_subprocess`'s note on `unused_assignments`.
+#[allow(unused_assignments)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_connector_subprocess_with_progress(
+    storage: &mut dyn Storage,
+    connector: &RegisteredConnector,
+    wire_ctx: WireRunContext,
+    sweep_safety_fraction: f64,
+    batch_max: usize,
+    cancel: Option<&CancelToken>,
+    progress: Option<&dyn ProgressSink>,
+) -> Result<ConnectorRunOutcome, DbsError> {
+    let source_name = wire_ctx.source_name.clone();
     let source_id = wire_ctx.source_id;
     let run_id = wire_ctx.run_id;
     let mode = wire_ctx.mode.clone();
@@ -356,6 +383,14 @@ pub fn run_connector_subprocess(
                             buffer.push(prepared);
                             if buffer.len() >= batch_max {
                                 flush!(last_cursor.as_ref());
+                                report_progress(
+                                    progress,
+                                    &source_name,
+                                    &mode,
+                                    items_seen,
+                                    &stats,
+                                    "",
+                                );
                             }
                         }
                         Err(e) => {
@@ -367,6 +402,7 @@ pub fn run_connector_subprocess(
                 FetchEvent::Checkpoint(cp) => {
                     last_cursor = Some(cp.cursor.clone());
                     flush!(last_cursor.as_ref());
+                    report_progress(progress, &source_name, &mode, items_seen, &stats, &cp.note);
                 }
                 FetchEvent::ReconcileMarker(marker) => {
                     reconcile_scopes
@@ -509,6 +545,36 @@ pub fn run_connector_subprocess(
     })
 }
 
+/// Emits one mid-run [`ProgressPhase::Checkpoint`] event: what has been
+/// fetched and committed so far, plus the connector's checkpoint note
+/// (e.g. "collection page 3") so the UI can show where the run is.
+fn report_progress(
+    progress: Option<&dyn ProgressSink>,
+    source: &str,
+    mode: &str,
+    fetched: u64,
+    stats: &BatchResult,
+    note: &str,
+) {
+    let Some(sink) = progress else {
+        return;
+    };
+    sink.emit(&ProgressEvent {
+        phase: ProgressPhase::Checkpoint,
+        source: source.to_string(),
+        mode: mode.to_string(),
+        fetched,
+        created: stats.created,
+        updated: stats.updated,
+        unchanged: stats.unchanged,
+        deleted: stats.deleted,
+        source_index: None,
+        source_total: None,
+        result: None,
+        note: note.to_string(),
+    });
+}
+
 fn write_context(child: &mut Child, wire_ctx: &WireRunContext) -> std::io::Result<()> {
     let mut stdin = child.stdin.take().expect("stdin was piped");
     let line = serde_json::to_string(wire_ctx)
@@ -554,6 +620,36 @@ impl ConnectorRunner for SubprocessRunner<'_> {
         since: Option<DateTime<Utc>>,
         limit: Option<u32>,
         cancel: Option<&CancelToken>,
+    ) -> Result<ConnectorRunOutcome, DbsError> {
+        self.run_connector_with_progress(
+            storage,
+            connector,
+            run_id,
+            source_id,
+            source_name,
+            mode,
+            cursor,
+            since,
+            limit,
+            cancel,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_connector_with_progress(
+        &self,
+        storage: &mut dyn Storage,
+        connector: &RegisteredConnector,
+        run_id: i64,
+        source_id: i64,
+        source_name: &str,
+        mode: &str,
+        cursor: Option<&Cursor>,
+        since: Option<DateTime<Utc>>,
+        limit: Option<u32>,
+        cancel: Option<&CancelToken>,
+        progress: Option<&dyn ProgressSink>,
     ) -> Result<ConnectorRunOutcome, DbsError> {
         // Re-read `.env` on every run rather than caching it on `self`:
         // it's a handful of lines, read once per source per backup, and
@@ -615,13 +711,14 @@ impl ConnectorRunner for SubprocessRunner<'_> {
             http_rate_limit_per_min: self.config.http_rate_limit_per_min,
         };
 
-        run_connector_subprocess(
+        run_connector_subprocess_with_progress(
             storage,
             connector,
             wire_ctx,
             self.config.sweep_safety_fraction,
             self.config.batch_max as usize,
             cancel,
+            progress,
         )
     }
 }

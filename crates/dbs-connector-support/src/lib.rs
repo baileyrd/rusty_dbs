@@ -36,6 +36,7 @@
 //! `dbs-core`.
 
 pub mod python_launch;
+pub mod step_fetch;
 pub mod subprocess_main;
 pub mod tiptap;
 pub mod watchdog;
@@ -43,6 +44,7 @@ pub mod watchdog;
 pub use python_launch::{
     find_python, run_python_script, run_python_script_using, PythonLaunchError,
 };
+pub use step_fetch::{step_fetch, EventQueue, Step};
 pub use subprocess_main::run_connector_main;
 pub use tiptap::tiptap_markdown;
 pub use watchdog::{run_with_watchdog, WatchdogError, WatchdogTimeout};

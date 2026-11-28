@@ -83,6 +83,12 @@ yet, so everything so far is under Unreleased.
   defaults instead of requiring hand-written JSON in the Advanced textarea.
 
 ### Fixed
+- Backups now save as they go instead of collecting everything first.
+  This covers Raindrop, Bluesky, GitHub, Mastodon, Readwise, Spotify,
+  Vimeo, Udemy, Podcast, YouTube and Reddit; video and audio downloads
+  also happen one item at a time. All backups report progress
+  mid-run, and the web UI shows a ticking elapsed time, the current page
+  and running counts, so a long first backup no longer looks stuck.
 - Sources added, removed, enabled or disabled in the web UI now take
   effect immediately. Previously the server kept serving the config it
   started with, so a new source didn't appear and **Back up now** was

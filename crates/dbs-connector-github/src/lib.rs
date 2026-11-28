@@ -41,6 +41,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+use dbs_connector_support::{step_fetch, EventQueue, Step};
 use dbs_core::parse_iso;
 use dbs_core::{
     BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor, FetchEvent, ItemKind,
@@ -176,15 +177,157 @@ impl GitHubConnector {
         Ok(value.as_array().cloned().unwrap_or_default())
     }
 
-    fn fetch_stars(
+    /// Fetches one page of stars and queues its items, then a checkpoint
+    /// carrying the cursor as it stood when the phase began. Returns
+    /// whether another page should be fetched.
+    ///
+    /// Called once per page by `fetch`'s [`step_fetch`] step, so each
+    /// page reaches the host before the next request is made.
+    fn stars_page(
         &self,
         http: &RefCell<ManagedHttpClient>,
         token: &str,
-        cursor: &mut serde_json::Map<String, Value>,
-        full: bool,
+        cursor: &serde_json::Map<String, Value>,
+        state: &mut StarsState,
         live_ids: &mut HashSet<String>,
-        out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-    ) {
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
+        let batch = self.get_stars_page(http, token, state.page)?;
+        if batch.is_empty() {
+            return Ok(false);
+        }
+        let mut stop = false;
+        for entry in &batch {
+            let starred_at = entry
+                .get("starred_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let ts = parse_iso(Some(&starred_at));
+            if let (Some(h), Some(t)) = (state.high, ts) {
+                if t < h - chrono::Duration::seconds(OVERLAP_SECONDS) {
+                    stop = true;
+                    break;
+                }
+            }
+            let Some(item) = star_item(entry) else {
+                continue;
+            };
+            live_ids.insert(item.external_id().to_string());
+            if state
+                .max_seen
+                .as_deref()
+                .is_none_or(|m| starred_at.as_str() > m)
+            {
+                state.max_seen = Some(starred_at.clone());
+            }
+            out.push_back(Ok(FetchEvent::Item(item)));
+        }
+        // Mid-phase checkpoints carry the OLD watermark: advancing
+        // it before the walk completes would let a crash skip the
+        // gap between the old mark and the last committed page
+        // forever.
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: Value::Object(cursor.clone()),
+            },
+            note: format!("stars page {}", state.page),
+        })));
+        if stop || (batch.len() as u32) < self.config.page_size {
+            return Ok(false);
+        }
+        state.page += 1;
+        Ok(true)
+    }
+
+    /// Fetches one page of gists and queues its items, then a
+    /// checkpoint. Returns whether another page should be fetched.
+    ///
+    /// Called once per page by `fetch`'s [`step_fetch`] step.
+    fn gists_page(
+        &self,
+        http: &RefCell<ManagedHttpClient>,
+        token: &str,
+        cursor: &serde_json::Map<String, Value>,
+        state: &mut GistsState,
+        live_ids: &mut HashSet<String>,
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
+        let batch = self.get_gists_page(http, token, state.page, state.since.as_deref())?;
+        if batch.is_empty() {
+            return Ok(false);
+        }
+        for gist in &batch {
+            let Some(gid) = gist_id(gist) else {
+                continue;
+            };
+            let item = gist_item(gist, &gid);
+            live_ids.insert(item.external_id().to_string());
+            let updated = gist
+                .get("updated_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !updated.is_empty()
+                && state
+                    .max_seen
+                    .as_deref()
+                    .is_none_or(|m| updated.as_str() > m)
+            {
+                state.max_seen = Some(updated);
+            }
+            out.push_back(Ok(FetchEvent::Item(item)));
+        }
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: Value::Object(cursor.clone()),
+            },
+            note: format!("gists page {}", state.page),
+        })));
+        if (batch.len() as u32) < self.config.page_size {
+            return Ok(false);
+        }
+        state.page += 1;
+        Ok(true)
+    }
+
+    /// Queues what follows the last page of both kinds: on a full run,
+    /// the combined reconcile marker, or a warning when a kind was
+    /// deliberately skipped.
+    fn finish(&self, full: bool, live_ids: HashSet<String>, out: &mut EventQueue) {
+        if !full {
+            return;
+        }
+        if self.config.include_stars && self.config.include_gists {
+            out.push_back(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
+                live_ids,
+            ))));
+        } else {
+            // A deliberately-partial enumeration must never offer
+            // the skipped kind's stored items up for the sweep.
+            // No logger equivalent exists in `RunContext` yet
+            // (same gap its own doc-comment calls out) — stderr
+            // stands in, matching this port's other connector-side
+            // warnings (e.g. `dbs-research::youtube_search`).
+            eprintln!(
+                "github: a kind is disabled (include_stars={}, include_gists={}) — deletion \
+                 detection skipped",
+                self.config.include_stars, self.config.include_gists
+            );
+        }
+    }
+}
+
+/// Paging state for the stars phase.
+struct StarsState {
+    /// Incremental early-stop watermark; `None` on a full run.
+    high: Option<chrono::DateTime<chrono::Utc>>,
+    max_seen: Option<String>,
+    page: u32,
+}
+
+impl StarsState {
+    fn new(cursor: &serde_json::Map<String, Value>, full: bool) -> Self {
         let high = if full {
             None
         } else {
@@ -193,81 +336,28 @@ impl GitHubConnector {
                 .and_then(|v| v.as_str())
                 .and_then(|s| parse_iso(Some(s)))
         };
-        let mut max_seen: Option<String> = cursor
+        let max_seen = cursor
             .get("stars_high_watermark")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut page = 1u32;
-        let mut stop = false;
-
-        while !stop {
-            let batch = match self.get_stars_page(http, token, page) {
-                Ok(b) => b,
-                Err(e) => {
-                    out.push(Err(e));
-                    return;
-                }
-            };
-            if batch.is_empty() {
-                break;
-            }
-            for entry in &batch {
-                let starred_at = entry
-                    .get("starred_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let ts = parse_iso(Some(&starred_at));
-                if let (Some(h), Some(t)) = (high, ts) {
-                    if t < h - chrono::Duration::seconds(OVERLAP_SECONDS) {
-                        stop = true;
-                        break;
-                    }
-                }
-                let Some(item) = star_item(entry) else {
-                    continue;
-                };
-                live_ids.insert(item.external_id().to_string());
-                if max_seen.as_deref().is_none_or(|m| starred_at.as_str() > m) {
-                    max_seen = Some(starred_at.clone());
-                }
-                out.push(Ok(FetchEvent::Item(item)));
-            }
-            // Mid-phase checkpoints carry the OLD watermark: advancing
-            // it before the walk completes would let a crash skip the
-            // gap between the old mark and the last committed page
-            // forever.
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(cursor.clone()),
-                },
-                note: format!("stars page {page}"),
-            })));
-            if (batch.len() as u32) < self.config.page_size {
-                break;
-            }
-            page += 1;
-        }
-        if let Some(seen) = max_seen {
-            cursor.insert("stars_high_watermark".to_string(), Value::String(seen));
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(cursor.clone()),
-                },
-                note: "stars done".to_string(),
-            })));
+        Self {
+            high,
+            max_seen,
+            page: 1,
         }
     }
+}
 
-    fn fetch_gists(
-        &self,
-        http: &RefCell<ManagedHttpClient>,
-        token: &str,
-        cursor: &mut serde_json::Map<String, Value>,
-        full: bool,
-        live_ids: &mut HashSet<String>,
-        out: &mut Vec<Result<FetchEvent, ConnectorError>>,
-    ) {
+/// Paging state for the gists phase.
+struct GistsState {
+    /// Server-side `since` filter; `None` on a full run.
+    since: Option<String>,
+    max_seen: Option<String>,
+    page: u32,
+}
+
+impl GistsState {
+    fn new(cursor: &serde_json::Map<String, Value>, full: bool) -> Self {
         let since = if full {
             None
         } else {
@@ -276,60 +366,46 @@ impl GitHubConnector {
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         };
-        let mut max_seen: Option<String> = cursor
+        let max_seen = cursor
             .get("gists_high_watermark")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut page = 1u32;
-
-        loop {
-            let batch = match self.get_gists_page(http, token, page, since.as_deref()) {
-                Ok(b) => b,
-                Err(e) => {
-                    out.push(Err(e));
-                    return;
-                }
-            };
-            if batch.is_empty() {
-                break;
-            }
-            for gist in &batch {
-                let Some(gid) = gist_id(gist) else {
-                    continue;
-                };
-                let item = gist_item(gist, &gid);
-                live_ids.insert(item.external_id().to_string());
-                let updated = gist
-                    .get("updated_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !updated.is_empty() && max_seen.as_deref().is_none_or(|m| updated.as_str() > m) {
-                    max_seen = Some(updated);
-                }
-                out.push(Ok(FetchEvent::Item(item)));
-            }
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(cursor.clone()),
-                },
-                note: format!("gists page {page}"),
-            })));
-            if (batch.len() as u32) < self.config.page_size {
-                break;
-            }
-            page += 1;
-        }
-        if let Some(seen) = max_seen {
-            cursor.insert("gists_high_watermark".to_string(), Value::String(seen));
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(cursor.clone()),
-                },
-                note: "gists done".to_string(),
-            })));
+        Self {
+            since,
+            max_seen,
+            page: 1,
         }
     }
+}
+
+/// Where a fetch is in its run.
+enum Stage {
+    Stars(StarsState),
+    Gists(GistsState),
+    /// Both kinds are done; queue the reconcile marker (if any).
+    Finish,
+    Done,
+}
+
+/// Ends a phase whose walk completed: advances that kind's watermark
+/// to the newest timestamp seen and queues a checkpoint committing it.
+fn finish_phase(
+    cursor: &mut serde_json::Map<String, Value>,
+    key: &str,
+    max_seen: Option<String>,
+    note: &str,
+    out: &mut EventQueue,
+) {
+    let Some(seen) = max_seen else {
+        return;
+    };
+    cursor.insert(key.to_string(), Value::String(seen));
+    out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+        cursor: Cursor {
+            value: Value::Object(cursor.clone()),
+        },
+        note: note.to_string(),
+    })));
 }
 
 fn star_item(entry: &Value) -> Option<BackupItem> {
@@ -630,41 +706,80 @@ impl Connector for GitHubConnector {
             .cloned()
             .unwrap_or_default();
         let mut live_ids = HashSet::new();
-
-        if self.config.include_stars {
-            self.fetch_stars(http, &token, &mut cursor, full, &mut live_ids, &mut out);
-            if matches!(out.last(), Some(Err(_))) {
-                return Box::new(out.into_iter());
-            }
-        }
-        if self.config.include_gists {
-            self.fetch_gists(http, &token, &mut cursor, full, &mut live_ids, &mut out);
-            if matches!(out.last(), Some(Err(_))) {
-                return Box::new(out.into_iter());
-            }
-        }
-
-        if full {
-            if self.config.include_stars && self.config.include_gists {
-                out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
-                    live_ids,
-                ))));
+        let include_gists = self.config.include_gists;
+        let after_stars = move |cursor: &serde_json::Map<String, Value>| {
+            if include_gists {
+                Stage::Gists(GistsState::new(cursor, full))
             } else {
-                // A deliberately-partial enumeration must never offer
-                // the skipped kind's stored items up for the sweep.
-                // No logger equivalent exists in `RunContext` yet
-                // (same gap its own doc-comment calls out) — stderr
-                // stands in, matching this port's other connector-side
-                // warnings (e.g. `dbs-research::youtube_search`).
-                eprintln!(
-                    "github: a kind is disabled (include_stars={}, include_gists={}) — deletion \
-                     detection skipped",
-                    self.config.include_stars, self.config.include_gists
-                );
+                Stage::Finish
             }
-        }
+        };
+        let mut stage = if self.config.include_stars {
+            Stage::Stars(StarsState::new(&cursor, full))
+        } else {
+            after_stars(&cursor)
+        };
+        let this = &*self;
 
-        Box::new(out.into_iter())
+        // One step = one API page. Each page's items and checkpoint reach
+        // the host before the next page is requested. An error ends the
+        // run: nothing after it is fetched, no phase-done checkpoint
+        // advances a watermark, and no reconcile marker is sent.
+        step_fetch(
+            move |out| match std::mem::replace(&mut stage, Stage::Done) {
+                Stage::Stars(mut st) => {
+                    match this.stars_page(http, &token, &cursor, &mut st, &mut live_ids, out) {
+                        Ok(true) => {
+                            stage = Stage::Stars(st);
+                            Step::More
+                        }
+                        Ok(false) => {
+                            finish_phase(
+                                &mut cursor,
+                                "stars_high_watermark",
+                                st.max_seen,
+                                "stars done",
+                                out,
+                            );
+                            stage = after_stars(&cursor);
+                            Step::More
+                        }
+                        Err(e) => {
+                            out.push_back(Err(e));
+                            Step::Done
+                        }
+                    }
+                }
+                Stage::Gists(mut st) => {
+                    match this.gists_page(http, &token, &cursor, &mut st, &mut live_ids, out) {
+                        Ok(true) => {
+                            stage = Stage::Gists(st);
+                            Step::More
+                        }
+                        Ok(false) => {
+                            finish_phase(
+                                &mut cursor,
+                                "gists_high_watermark",
+                                st.max_seen,
+                                "gists done",
+                                out,
+                            );
+                            stage = Stage::Finish;
+                            Step::More
+                        }
+                        Err(e) => {
+                            out.push_back(Err(e));
+                            Step::Done
+                        }
+                    }
+                }
+                Stage::Finish => {
+                    this.finish(full, std::mem::take(&mut live_ids), out);
+                    Step::Done
+                }
+                Stage::Done => Step::Done,
+            },
+        )
     }
 }
 
@@ -899,6 +1014,67 @@ mod tests {
             .collect();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].external_id(), "star:1");
+    }
+
+    /// Page N+1 must not be requested until page N's events, ending in
+    /// its checkpoint, have been handed to the caller.
+    #[test]
+    fn fetch_yields_each_page_before_requesting_the_next() {
+        let mut server = mockito::Server::new();
+        let page_query =
+            |page: &str| mockito::Matcher::UrlEncoded("page".to_string(), page.to_string());
+        let m0 = server
+            .mock("GET", "/user/starred")
+            .match_query(page_query("1"))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([star_json(1, "me/a", "2024-06-02T00:00:00Z")]).to_string(),
+            )
+            .expect(1)
+            .create();
+        let m1 = server
+            .mock("GET", "/user/starred")
+            .match_query(page_query("2"))
+            .with_status(200)
+            .with_body(serde_json::json!([]).to_string())
+            .expect(1)
+            .create();
+
+        let config = GitHubConfig {
+            include_gists: false,
+            page_size: 1,
+            ..Default::default()
+        };
+        let mut connector = GitHubConnector::new(config).with_base_url(server.url());
+        let ctx = ctx_with("incremental", None, no_sleep_client(), Some("tok"));
+        let mut iter = connector.fetch(&ctx);
+
+        // Page 1: one star, then its checkpoint.
+        assert!(matches!(iter.next(), Some(Ok(FetchEvent::Item(_)))));
+        match iter.next() {
+            Some(Ok(FetchEvent::Checkpoint(cp))) => assert_eq!(cp.note, "stars page 1"),
+            other => panic!("expected page 1's checkpoint, got {other:?}"),
+        }
+        m0.assert();
+        assert!(
+            !m1.matched(),
+            "page 2 was requested before page 1 was consumed"
+        );
+
+        // Draining fetches page 2 (empty) exactly once, then the phase
+        // ends with its watermark-advancing checkpoint.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m1.assert();
+        match rest.as_slice() {
+            [FetchEvent::Checkpoint(cp)] => {
+                assert_eq!(cp.note, "stars done");
+                assert_eq!(
+                    cp.cursor.value["stars_high_watermark"],
+                    "2024-06-02T00:00:00Z"
+                );
+            }
+            other => panic!("expected only the stars-done checkpoint, got {other:?}"),
+        }
     }
 
     #[test]

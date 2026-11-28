@@ -29,6 +29,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+use dbs_connector_support::{step_fetch, EventQueue, Step};
 use dbs_core::parse_iso;
 use dbs_core::{
     BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor, FetchEvent, ItemKind,
@@ -134,6 +135,62 @@ impl BlueskyConnector {
         response
             .json()
             .map_err(|e| ConnectorError::Transient(format!("invalid JSON response: {e}")))
+    }
+
+    /// Fetches one `listRecords` page and queues its likes, then a
+    /// checkpoint. Returns whether another page should be fetched.
+    ///
+    /// Called once per page by `fetch`'s [`step_fetch`] step, so each
+    /// page reaches the host before the next request is made.
+    fn likes_page(
+        &self,
+        http: &RefCell<ManagedHttpClient>,
+        base: &str,
+        token: &str,
+        did: &str,
+        state: &mut LikesState,
+        out: &mut EventQueue,
+    ) -> Result<bool, ConnectorError> {
+        let mut params = vec![
+            ("repo", did.to_string()),
+            ("collection", LIKE_COLLECTION.to_string()),
+            ("limit", self.config.page_size.to_string()),
+        ];
+        if let Some(c) = &state.cursor_param {
+            params.push(("cursor", c.clone()));
+        }
+        let payload = self.list_records(http, base, token, &params)?;
+        let Some(records) = payload.get("records").and_then(|v| v.as_array()) else {
+            return Err(ConnectorError::Transient(
+                "bluesky: listRecords returned no records".to_string(),
+            ));
+        };
+        for rec in records {
+            let Some(item) = to_item(rec) else {
+                continue;
+            };
+            state.live_ids.insert(item.external_id().to_string());
+            out.push_back(Ok(FetchEvent::Item(item)));
+        }
+        // No cursor of our own to persist between runs — every run
+        // walks the full listing from scratch.
+        out.push_back(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: Value::Object(serde_json::Map::new()),
+            },
+            note: format!("likes page {}", state.page),
+        })));
+        let next_cursor = payload
+            .get("cursor")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if records.is_empty() || next_cursor.is_none() {
+            return Ok(false);
+        }
+        state.cursor_param = next_cursor;
+        state.page += 1;
+        Ok(true)
     }
 }
 
@@ -324,64 +381,50 @@ impl Connector for BlueskyConnector {
                 }
             };
 
-        let mut live_ids = HashSet::new();
-        let mut cursor_param: Option<String> = None;
-        let mut page = 1u32;
-        loop {
-            let mut params = vec![
-                ("repo", did.clone()),
-                ("collection", LIKE_COLLECTION.to_string()),
-                ("limit", self.config.page_size.to_string()),
-            ];
-            if let Some(c) = &cursor_param {
-                params.push(("cursor", c.clone()));
-            }
-            let payload = match self.list_records(http, &base, &token, &params) {
-                Ok(p) => p,
-                Err(e) => {
-                    out.push(Err(e));
-                    return Box::new(out.into_iter());
+        let mut state = Some(LikesState {
+            live_ids: HashSet::new(),
+            cursor_param: None,
+            page: 1,
+        });
+        let this = &*self;
+
+        // One step = one `listRecords` page. Each page's likes and
+        // checkpoint reach the host before the next page is requested;
+        // the reconcile marker follows the last page only.
+        step_fetch(move |out| {
+            let Some(mut st) = state.take() else {
+                return Step::Done;
+            };
+            match this.likes_page(http, &base, &token, &did, &mut st, out) {
+                Ok(true) => {
+                    state = Some(st);
+                    Step::More
                 }
-            };
-            let Some(records) = payload.get("records").and_then(|v| v.as_array()) else {
-                out.push(Err(ConnectorError::Transient(
-                    "bluesky: listRecords returned no records".to_string(),
-                )));
-                return Box::new(out.into_iter());
-            };
-            for rec in records {
-                let Some(item) = to_item(rec) else {
-                    continue;
-                };
-                live_ids.insert(item.external_id().to_string());
-                out.push(Ok(FetchEvent::Item(item)));
+                Ok(false) => {
+                    out.push_back(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
+                        st.live_ids,
+                    ))));
+                    Step::Done
+                }
+                // An error ends the run; no reconcile marker is sent for a
+                // partial listing.
+                Err(e) => {
+                    out.push_back(Err(e));
+                    Step::Done
+                }
             }
-            // No cursor of our own to persist between runs — every run
-            // walks the full listing from scratch.
-            out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
-                cursor: Cursor {
-                    value: Value::Object(serde_json::Map::new()),
-                },
-                note: format!("likes page {page}"),
-            })));
-            let next_cursor = payload
-                .get("cursor")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            if records.is_empty() || next_cursor.is_none() {
-                break;
-            }
-            cursor_param = next_cursor;
-            page += 1;
-        }
-
-        out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
-            live_ids,
-        ))));
-
-        Box::new(out.into_iter())
+        })
     }
+}
+
+/// Per-run paging state for the likes listing.
+struct LikesState {
+    /// Every like seen so far, for the final reconcile marker.
+    live_ids: HashSet<String>,
+    /// The `listRecords` cursor for the next page; `None` on the first.
+    cursor_param: Option<String>,
+    /// 1-based page number, used in checkpoint notes.
+    page: u32,
 }
 
 #[cfg(test)]
@@ -639,6 +682,83 @@ mod tests {
             })
             .collect();
         assert_eq!(items.len(), 2, "{evs:?}");
+    }
+
+    /// Page N+1 must not be requested until page N's events, ending in
+    /// its checkpoint, have been handed to the caller.
+    #[test]
+    fn fetch_yields_each_page_before_requesting_the_next() {
+        let mut server = mockito::Server::new();
+        let _m_session = server
+            .mock(
+                "POST",
+                mockito::Matcher::Regex(r"^/xrpc/com.atproto.server.createSession".to_string()),
+            )
+            .with_status(200)
+            .with_body(session_body())
+            .create();
+        let page0 = serde_json::json!({
+            "records": [like_record(
+                "at://did:plc:abc123/app.bsky.feed.like/1",
+                "at://did:plc:other/app.bsky.feed.post/r1",
+                "2024-06-01T00:00:00Z",
+            )],
+            "cursor": "next-page-cursor",
+        });
+        let page1 = serde_json::json!({
+            "records": [like_record(
+                "at://did:plc:abc123/app.bsky.feed.like/2",
+                "at://did:plc:other/app.bsky.feed.post/r2",
+                "2024-06-02T00:00:00Z",
+            )],
+        });
+        let m0 = server
+            .mock("GET", "/xrpc/com.atproto.repo.listRecords")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(page0.to_string())
+            .expect(1)
+            .create();
+        let m1 = server
+            .mock("GET", "/xrpc/com.atproto.repo.listRecords")
+            .match_query(mockito::Matcher::Regex(
+                r"cursor=next-page-cursor".to_string(),
+            ))
+            .with_status(200)
+            .with_body(page1.to_string())
+            .expect(1)
+            .create();
+
+        let mut connector = BlueskyConnector::new(config_for(&server.url()));
+        let ctx = ctx_with(no_sleep_client(), Some("app-password"));
+        let mut iter = connector.fetch(&ctx);
+
+        // Page 1: one like, then its checkpoint.
+        assert!(matches!(iter.next(), Some(Ok(FetchEvent::Item(_)))));
+        match iter.next() {
+            Some(Ok(FetchEvent::Checkpoint(cp))) => assert_eq!(cp.note, "likes page 1"),
+            other => panic!("expected page 1's checkpoint, got {other:?}"),
+        }
+        m0.assert();
+        assert!(
+            !m1.matched(),
+            "page 2 was requested before page 1 was consumed"
+        );
+
+        // Draining fetches page 2 exactly once; the marker covers both.
+        let rest: Vec<FetchEvent> = iter.map(|r| r.unwrap()).collect();
+        m1.assert();
+        match rest.last() {
+            Some(FetchEvent::ReconcileMarker(m)) => {
+                assert!(m
+                    .live_ids
+                    .contains("at://did:plc:abc123/app.bsky.feed.like/1"));
+                assert!(m
+                    .live_ids
+                    .contains("at://did:plc:abc123/app.bsky.feed.like/2"));
+            }
+            other => panic!("expected a final reconcile marker, got {other:?}"),
+        }
     }
 
     #[test]
