@@ -896,10 +896,13 @@ mod tests {
         let empty = serde_json::json!([]);
         let gists_page0 = serde_json::json!([gist_json("g1", "my gist", "2024-06-02T00:00:00Z")]);
 
+        // Match `page=N` as a whole query parameter: a bare `page=1` also
+        // matches inside `per_page=100`, leaving which mock answers which
+        // page up to mockito's match order.
         let _m_stars0 = server
             .mock(
                 "GET",
-                mockito::Matcher::Regex(r"^/user/starred\?.*page=1.*".to_string()),
+                mockito::Matcher::Regex(r"^/user/starred\?(.*&)?page=1(&|$)".to_string()),
             )
             .with_status(200)
             .with_body(stars_page0.to_string())
@@ -907,7 +910,7 @@ mod tests {
         let _m_stars1 = server
             .mock(
                 "GET",
-                mockito::Matcher::Regex(r"^/user/starred\?.*page=2.*".to_string()),
+                mockito::Matcher::Regex(r"^/user/starred\?(.*&)?page=2(&|$)".to_string()),
             )
             .with_status(200)
             .with_body(empty.to_string())
@@ -915,7 +918,7 @@ mod tests {
         let _m_gists0 = server
             .mock(
                 "GET",
-                mockito::Matcher::Regex(r"^/gists\?.*page=1.*".to_string()),
+                mockito::Matcher::Regex(r"^/gists\?(.*&)?page=1(&|$)".to_string()),
             )
             .with_status(200)
             .with_body(gists_page0.to_string())
@@ -923,7 +926,7 @@ mod tests {
         let _m_gists1 = server
             .mock(
                 "GET",
-                mockito::Matcher::Regex(r"^/gists\?.*page=2.*".to_string()),
+                mockito::Matcher::Regex(r"^/gists\?(.*&)?page=2(&|$)".to_string()),
             )
             .with_status(200)
             .with_body(empty.to_string())
