@@ -8,6 +8,56 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Close the follow-ups found while streaming connectors
+**2026-11-27**
+
+Four problems found during the streaming work (see the next entry), each
+in its own commit.
+
+- **Spotify forgot its place every run.** Playlist-page checkpoints
+  carried an empty cursor, and the host replaces the stored cursor at
+  each checkpoint. So a run with playlists on ended with `{}`, losing
+  the `tracks_high_watermark` saved at "tracks done", and every
+  incremental run re-read the whole liked-tracks list. Playlist
+  checkpoints now carry the cursor as the tracks phase left it. The new
+  regression test fails on the old code.
+- **Skool advertised downloads it doesn't do.** Skool is deliberately
+  catalog-only: its download pipeline isn't ported. But its setup hint
+  said resource files were saved under `<download_root>`, its install
+  pulled in yt-dlp, nodejs-wheel and ffmpeg-downloader, and the
+  `dbs init` template documented `download_videos`, `video_quality` and
+  the other `video_*` options at length. The hint and schema text now
+  say videos and resources aren't downloaded yet, the install needs only
+  Playwright, and the template marks the download keys as reserved. A
+  test keeps it that way until downloads exist. The
+  `YOUTUBE_COOKIES_FILE` and `GITHUB_TOKEN` keys stay declared, because
+  `fetch` validates `video_cookies_file_env` against them; removing them
+  belongs with the download work.
+- **Flaky `dbs serve` startup tests.** These failed in CI on two of the
+  last three runs ("never accepted a connection") and passed on re-run.
+  All three startup waits now use one 30-second `STARTUP_TIMEOUT`. Each
+  wait returns as soon as the server is ready, so this only matters on
+  a slow runner.
+- **Fragile tests.**
+  - YouTube's discovery-failure test used a `#!/bin/sh` fake without
+    `#[cfg(unix)]`. On Windows the fake couldn't launch, which also
+    counts as a discovery failure, so the test passed without testing
+    anything. It now uses a `.cmd`/`sh` fake that leaves a marker, and
+    checks the marker.
+  - GitHub's page mocks matched `page=1`, which also matches inside
+    `per_page=100`. They now match `page=N` as a whole query parameter.
+
+### Fixed
+- Spotify incremental runs re-reading every liked track.
+- Skool claiming to download videos and resources, and installing
+  download-only tools.
+- Intermittent CI failures in the `dbs serve` startup tests.
+
+### Security
+- None.
+
+---
+
 ## Backups save as they go and show live progress
 **2026-11-27**
 
